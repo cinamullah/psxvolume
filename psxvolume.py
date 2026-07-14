@@ -41,8 +41,7 @@ def init_db():
     with sqlite3.connect(DB_NAME) as conn:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS trading_dates (
-                idx INTEGER PRIMARY KEY,
-                date TEXT UNIQUE
+                idx INTEGER PRIMARY KEY, date TEXT UNIQUE
             )
         """)
         conn.execute("""
@@ -142,7 +141,7 @@ def sync_historical_data():
     set_meta("last_sync_time", datetime.now(TZ).isoformat())
     return True
 
-# ── Live Scan (every 15 min during market hours) ────────────────────────
+# ── Live Scan ────────────────────────────────────────────────────────────
 def fetch_tv_snapshot():
     tv_symbols = ["PSX:" + s.replace(".KA", "") for s in WATCHLIST]
     payload = {
@@ -232,29 +231,87 @@ def scan_live_data():
     set_meta("last_scan_time", now.isoformat())
     return True
 
-# ── Page Setup & Styling ─────────────────────────────────────────────────
+# ── Page Setup ───────────────────────────────────────────────────────────
 st.set_page_config(layout="wide", page_title="PSX Volume Spike Scanner")
 init_db()
 
 st.markdown("""
 <style>
-    :root { --border: #333844; --muted: #a3a8b4; --accent: #ff4b4b; }
-    .block-container { padding-top: 1rem; padding-bottom: 1rem; max-width: 1150px; }
-    h1, h2, h3, h4 { font-family: Georgia, 'Times New Roman', serif; letter-spacing: 0.2px; }
-    .report-header { border-bottom: 1px solid var(--border); padding-bottom: 6px; margin-bottom: 6px; }
-    .report-header h1 { font-size: 1.35rem; margin: 0; }
-    .report-header .caption-line { font-family: Georgia, 'Times New Roman', serif; font-size: 0.78rem; color: var(--muted); margin: 0; line-height: 1.35; }
-    .section-title { font-family: Georgia, 'Times New Roman', serif; font-size: 0.85rem; font-weight: 700; color: var(--accent); text-transform: uppercase; letter-spacing: 0.5px; margin: 10px 0 4px 0; border-bottom: 1px solid var(--border); padding-bottom: 3px; }
-    .section-card { background-color: #1a1d24; border: 1px solid var(--border); border-radius: 4px; padding: 8px 12px 4px 12px; margin-bottom: 4px; }
-    .section-card p[data-testid="stCaptionContainer"] { font-size: 0.72rem !important; margin-bottom: 4px !important; }
-    .status-line { font-family: Georgia, 'Times New Roman', serif; font-size: 0.72rem; color: var(--muted); margin: 2px 0 8px 0; }
-    div[data-testid="stVerticalBlock"] { gap: 0.25rem !important; }
+    :root {
+        --border: #2d3139;
+        --muted: #8b8fa3;
+        --accent: #00b894;
+        --accent-dim: #009977;
+        --card-bg: #1a1d24;
+    }
+    .block-container { padding-top: 1.25rem; padding-bottom: 1.25rem; max-width: 1200px; }
+    h1, h2, h3, h4 {
+        font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+        letter-spacing: -0.01em;
+    }
+    .report-header { margin-bottom: 0.75rem; }
+    .report-header h1 {
+        font-size: 1.5rem; font-weight: 600; margin: 0; color: #e8e8ed;
+    }
+    .report-header .caption-line {
+        font-size: 0.8rem; color: var(--muted); margin: 2px 0 0 0;
+    }
+    .section-title {
+        font-size: 0.8rem; font-weight: 600;
+        color: var(--accent); text-transform: uppercase;
+        letter-spacing: 0.6px; margin: 1rem 0 0.35rem 0;
+    }
+    .section-card {
+        background: var(--card-bg);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 0.75rem 1rem 0.5rem 1rem;
+        margin-bottom: 0.35rem;
+    }
+    .status-line {
+        font-size: 0.72rem; color: var(--muted); margin: 0.25rem 0 0.5rem 0;
+    }
+    div[data-testid="stVerticalBlock"] { gap: 0.15rem !important; }
     div[data-testid="stElementToolbar"] { display: none; }
-    div[data-testid="stDataFrame"] { font-size: 0.78rem; }
-    div[data-testid="stButton"] button { font-size: 0.78rem; padding: 0.2rem 0.6rem; min-height: 0; }
-    div[data-testid="stAlert"] { padding: 5px 10px; font-size: 0.78rem; }
+    div[data-testid="stDataFrame"] { font-size: 0.8rem; }
+    div[data-testid="stDataFrame"] td {
+        padding: 0.25rem 0.5rem !important;
+        border-bottom: 1px solid #252830;
+    }
+    div[data-testid="stDataFrame"] th {
+        padding: 0.35rem 0.5rem !important;
+        background: #22252c;
+        color: var(--muted);
+        font-weight: 500;
+        font-size: 0.72rem;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+    }
+    div[data-testid="stDataFrame"] tbody tr:hover {
+        background: #22252c;
+    }
+    div[data-testid="stButton"] button {
+        font-size: 0.8rem;
+        padding: 0.2rem 0.75rem;
+        border-radius: 6px;
+        font-weight: 500;
+    }
+    div[data-testid="stAlert"] {
+        padding: 0.4rem 0.75rem;
+        font-size: 0.8rem;
+        border-radius: 6px;
+    }
     div.stSpinner > div { margin: 0; }
-    .stApp header { display: none; }
+    button[kind="primary"] {
+        background: var(--accent) !important;
+        border-color: var(--accent) !important;
+    }
+    div[data-testid="metric-container"] {
+        background: var(--card-bg);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 0.5rem 1rem;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -264,8 +321,12 @@ market_open = is_market_open(now)
 st.markdown(f"""
 <div class="report-header">
     <h1>PSX Volume Spike Report</h1>
-    <p class="caption-line">RVOL ≥ {RVOL_THRESHOLD} &nbsp;·&nbsp; {now.strftime('%Y-%m-%d %H:%M')} PKT &nbsp;·&nbsp;
-    Market {'🟢 Open' if market_open else '🔴 Closed'} (9:15–15:30) &nbsp;·&nbsp; Auto-refresh {SNAPSHOT_INTERVAL_MIN} min</p>
+    <p class="caption-line">
+        RVOL ≥ {RVOL_THRESHOLD} &nbsp;·&nbsp;
+        {now.strftime('%A, %Y-%m-%d %H:%M')} PKT &nbsp;·&nbsp;
+        {'🟢 Market Open' if market_open else '🔴 Market Closed'}
+        &nbsp;·&nbsp; Auto-refresh every {SNAPSHOT_INTERVAL_MIN} min
+    </p>
 </div>
 """, unsafe_allow_html=True)
 
@@ -274,14 +335,14 @@ if market_open:
 
 col_a, col_b, col_c = st.columns([1, 1, 6])
 with col_a:
-    scan_clicked = st.button("Scan", use_container_width=True)
+    scan_clicked = st.button("📡 Scan", use_container_width=True)
 with col_b:
-    sync_clicked = st.button("Sync", use_container_width=True)
+    sync_clicked = st.button("🔄 Sync", use_container_width=True)
 
 if scan_clicked:
-    with st.spinner("Scanning..."):
+    with st.spinner("Scanning live market data..."):
         if scan_live_data():
-            st.success("Scan complete")
+            st.success("Live scan complete")
             st.rerun()
 
 if sync_clicked:
@@ -289,19 +350,17 @@ if sync_clicked:
     today_str = now.strftime('%Y-%m-%d')
     if last_sync_date == today_str:
         st.info("Already synced today. Re-syncing.")
-    with st.spinner("Syncing..."):
+    with st.spinner("Syncing historical data..."):
         if sync_historical_data():
-            st.success("Sync complete")
+            st.success("Historical sync complete")
             st.rerun()
 
-# Auto-sync (once per day)
 if not sync_clicked:
     today_str = now.strftime('%Y-%m-%d')
     if get_meta("last_sync_date") != today_str:
-        with st.spinner("Auto-syncing..."):
+        with st.spinner("Auto-syncing historical data..."):
             sync_historical_data()
 
-# Auto-scan (every 15 min during market hours)
 if market_open and not scan_clicked:
     last_scan_str = get_meta("last_scan_time")
     should_scan = True
@@ -313,67 +372,8 @@ if market_open and not scan_clicked:
         except ValueError:
             pass
     if should_scan:
-        with st.spinner("Auto-scanning..."):
+        with st.spinner("Auto-scanning market data..."):
             scan_live_data()
 
 last_scan_time = get_meta("last_scan_time")
 last_sync_time = get_meta("last_sync_date")
-st.markdown(
-    f'<p class="status-line">Live scan: {last_scan_time or "never"} &nbsp;·&nbsp; '
-    f'Historical sync: {last_sync_time or "never"}</p>',
-    unsafe_allow_html=True
-)
-
-# ── Today (Live) ─────────────────────────────────────────────────────────
-st.markdown('<div class="section-title">Today — Live</div>', unsafe_allow_html=True)
-today_str = now.strftime('%Y-%m-%d')
-with sqlite3.connect(DB_NAME) as conn:
-    live_df = pd.read_sql("""
-        SELECT snap_time, symbol, rvol, price_change, volume_direction, price_direction,
-               vol_chg_1h, vol_chg_2h
-        FROM live_snapshots
-        WHERE snap_time LIKE ?
-        ORDER BY snap_time DESC
-    """, conn, params=(f"{today_str}%",))
-
-st.markdown('<div class="section-card">', unsafe_allow_html=True)
-if not live_df.empty:
-    latest_time = live_df['snap_time'].max()
-    live_df = live_df[live_df['snap_time'] == latest_time].drop(columns=['snap_time'])
-    live_df = live_df.sort_values('rvol', ascending=False)
-    st.caption(f"{len(live_df)} symbol(s) crossing RVOL ≥ {RVOL_THRESHOLD} &nbsp;·&nbsp; {latest_time}")
-    live_df.columns = ["Symbol", "Relative Vol.", "Change %", "Vol. Direction",
-                        "Price Direction", "Vol Δ vs 1H %", "Vol Δ vs 2H %"]
-    st.dataframe(live_df, use_container_width=True, hide_index=True)
-else:
-    st.info(f"No spikes crossing RVOL ≥ {RVOL_THRESHOLD} yet today.")
-st.markdown('</div>', unsafe_allow_html=True)
-
-# ── Yesterday / Two Days Ago ────────────────────────────────────────────
-with sqlite3.connect(DB_NAME) as conn:
-    hist_dates = [row[0] for row in
-                  conn.execute("SELECT date FROM trading_dates ORDER BY idx ASC LIMIT 2").fetchall()]
-
-for i, title in enumerate(["Yesterday", "Two Days Ago"]):
-    st.markdown(f'<div class="section-title">{title}</div>', unsafe_allow_html=True)
-    st.markdown('<div class="section-card">', unsafe_allow_html=True)
-    if i < len(hist_dates):
-        target_date = hist_dates[i]
-        st.caption(target_date)
-
-        with sqlite3.connect(DB_NAME) as conn:
-            df = pd.read_sql("""
-                SELECT symbol, rvol, price_change, volume_direction, price_direction
-                FROM spikes WHERE date = ? ORDER BY rvol DESC
-            """, conn, params=(target_date,))
-
-        if not df.empty:
-            df.columns = ["Symbol", "Relative Vol.", "Change %",
-                          "Vol. Direction", "Price Direction"]
-            st.dataframe(df, use_container_width=True, hide_index=True)
-        else:
-            st.info(f"No spikes crossing RVOL ≥ {RVOL_THRESHOLD} on this day.")
-    else:
-        st.caption("—")
-        st.info("Click Sync above to initialize.")
-    st.markdown('</div>', unsafe_allow_html=True)
