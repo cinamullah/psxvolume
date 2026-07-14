@@ -276,37 +276,107 @@ init_db()
 
 st.markdown("""
 <style>
-    .stApp { background-color: #fafaf7; }
-    h1, h2, h3 { font-family: Georgia, 'Times New Roman', serif; color: #1a1a1a; }
+    :root {
+        --bg: #0e0f11;
+        --panel: #16181c;
+        --border: #2a2d33;
+        --text: #d8dadd;
+        --muted: #8a8f98;
+        --accent: #c9a34e;
+    }
+    .stApp { background-color: var(--bg); }
+    .block-container {
+        padding-top: 0.8rem;
+        padding-bottom: 1rem;
+        max-width: 1200px;
+    }
+    h1, h2, h3, h4 {
+        font-family: Georgia, 'Times New Roman', serif;
+        color: var(--text) !important;
+        letter-spacing: 0.2px;
+    }
+    p, span, label, div { color: var(--text); }
     .report-header {
-        border-bottom: 2px solid #1a1a1a;
-        padding-bottom: 10px;
-        margin-bottom: 20px;
+        border-bottom: 1px solid var(--border);
+        padding-bottom: 6px;
+        margin-bottom: 6px;
+    }
+    .report-header h1 {
+        font-size: 1.35rem;
+        margin: 0 0 2px 0;
+    }
+    .report-header .caption-line {
+        font-family: Georgia, 'Times New Roman', serif;
+        font-size: 0.78rem;
+        color: var(--muted);
+        margin: 0;
+    }
+    .section-title {
+        font-family: Georgia, 'Times New Roman', serif;
+        font-size: 0.95rem;
+        font-weight: 700;
+        color: var(--accent);
+        text-transform: uppercase;
+        letter-spacing: 0.6px;
+        margin: 10px 0 4px 0;
+        border-bottom: 1px solid var(--border);
+        padding-bottom: 3px;
     }
     .section-card {
-        background-color: #ffffff;
-        border: 1px solid #d8d5cc;
-        border-radius: 4px;
-        padding: 16px 18px;
-        margin-bottom: 10px;
+        background-color: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 3px;
+        padding: 8px 10px;
+        margin-bottom: 6px;
+    }
+    .section-card .stCaption, .section-card p {
+        font-size: 0.75rem !important;
+        color: var(--muted) !important;
+        margin: 0 0 4px 0 !important;
     }
     .status-line {
         font-family: Georgia, 'Times New Roman', serif;
-        font-size: 0.85rem;
-        color: #555;
+        font-size: 0.72rem;
+        color: var(--muted);
+        margin: 2px 0 6px 0;
     }
-    div[data-testid="stDataFrame"] { font-family: Georgia, 'Times New Roman', serif; }
+    hr, div[data-testid="stDivider"] {
+        margin: 6px 0 !important;
+        border-color: var(--border) !important;
+    }
+    div[data-testid="stDataFrame"] {
+        font-family: Georgia, 'Times New Roman', serif;
+        font-size: 0.8rem;
+    }
+    div[data-testid="stVerticalBlock"] { gap: 0.35rem !important; }
+    div[data-testid="stButton"] button {
+        background-color: var(--panel);
+        color: var(--text);
+        border: 1px solid var(--border);
+        font-size: 0.78rem;
+        padding: 0.25rem 0.6rem;
+    }
+    div[data-testid="stButton"] button:hover {
+        border-color: var(--accent);
+        color: var(--accent);
+    }
+    div[data-testid="stAlert"] {
+        padding: 6px 10px;
+        font-size: 0.78rem;
+    }
 </style>
 """, unsafe_allow_html=True)
 
 now = datetime.now(TZ)
 market_open = is_market_open(now)
 
-st.markdown('<div class="report-header">', unsafe_allow_html=True)
-st.title("📈 PSX Volume Spike Report")
-st.caption(f"Relative Volume threshold ≥ {RVOL_THRESHOLD}  ·  Karachi time: {now.strftime('%Y-%m-%d %H:%M:%S')}  ·  "
-           f"Market is {'🟢 OPEN' if market_open else '🔴 CLOSED'} (session 9:15–15:30)")
-st.markdown('</div>', unsafe_allow_html=True)
+st.markdown(f"""
+<div class="report-header">
+    <h1>PSX Volume Spike Report</h1>
+    <p class="caption-line">RVOL threshold ≥ {RVOL_THRESHOLD} &nbsp;·&nbsp; Karachi time: {now.strftime('%Y-%m-%d %H:%M:%S')} &nbsp;·&nbsp; 
+    Market {'🟢 OPEN' if market_open else '🔴 CLOSED'} (session 9:15–15:30)</p>
+</div>
+""", unsafe_allow_html=True)
 
 # Auto-refresh the page every 15 minutes while the market is open, so the live
 # section keeps itself current without the user needing to click anything.
@@ -314,11 +384,11 @@ if market_open:
     st.markdown(f'<meta http-equiv="refresh" content="{SNAPSHOT_INTERVAL_MIN * 60}">', unsafe_allow_html=True)
 
 # ── Buttons ──────────────────────────────────────────────────────────────
-col_a, col_b, col_c = st.columns([1, 1, 3])
+col_a, col_b, col_c = st.columns([1, 1, 4])
 with col_a:
-    scan_clicked = st.button("📡 Scan Live Data", use_container_width=True)
+    scan_clicked = st.button("Scan Live", use_container_width=True)
 with col_b:
-    sync_clicked = st.button("🔄 Sync Historical Data", use_container_width=True)
+    sync_clicked = st.button("Sync Historical", use_container_width=True)
 
 if scan_clicked:
     with st.spinner("Scanning live market data..."):
@@ -359,10 +429,8 @@ st.markdown(
     unsafe_allow_html=True
 )
 
-st.divider()
-
 # ── Section 1: Today (Live) ──────────────────────────────────────────────
-st.subheader("Today — Live")
+st.markdown('<div class="section-title">Today — Live</div>', unsafe_allow_html=True)
 today_str = now.strftime('%Y-%m-%d')
 with sqlite3.connect(DB_NAME) as conn:
     live_df = pd.read_sql("""
@@ -386,37 +454,33 @@ else:
     st.info("No live spikes yet today. Click 'Scan Live Data' during market hours (9:15–15:30 PKT).")
 st.markdown('</div>', unsafe_allow_html=True)
 
-st.divider()
-
-# ── Sections 2 & 3: Yesterday / Two Days Ago (Historical) ───────────────
+# ── Sections 2 & 3: Yesterday / Two Days Ago (Historical, stacked) ──────
 with sqlite3.connect(DB_NAME) as conn:
     hist_dates = [row[0] for row in
                   conn.execute("SELECT date FROM trading_dates ORDER BY idx ASC LIMIT 2").fetchall()]
 
-hist_cols = st.columns(2)
 hist_titles = ["Yesterday", "Two Days Ago"]
 
-for i, col in enumerate(hist_cols):
-    with col:
-        st.subheader(hist_titles[i])
-        st.markdown('<div class="section-card">', unsafe_allow_html=True)
-        if i < len(hist_dates):
-            target_date = hist_dates[i]
-            st.caption(f"Date: {target_date}")
+for i in range(2):
+    st.markdown(f'<div class="section-title">{hist_titles[i]}</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-card">', unsafe_allow_html=True)
+    if i < len(hist_dates):
+        target_date = hist_dates[i]
+        st.caption(f"Date: {target_date}")
 
-            with sqlite3.connect(DB_NAME) as conn:
-                df = pd.read_sql("""
-                    SELECT symbol, rvol, price_change, volume_direction, price_direction
-                    FROM spikes WHERE date = ? ORDER BY rvol DESC
-                """, conn, params=(target_date,))
+        with sqlite3.connect(DB_NAME) as conn:
+            df = pd.read_sql("""
+                SELECT symbol, rvol, price_change, volume_direction, price_direction
+                FROM spikes WHERE date = ? ORDER BY rvol DESC
+            """, conn, params=(target_date,))
 
-            if not df.empty:
-                df.columns = ["Symbol", "Relative Volume", "Price Change %",
-                              "Volume Direction", "Price Direction"]
-                st.dataframe(df, use_container_width=True, hide_index=True)
-            else:
-                st.info(f"No spikes crossed RVOL ≥ {RVOL_THRESHOLD} on this day.")
+        if not df.empty:
+            df.columns = ["Symbol", "Relative Volume", "Price Change %",
+                          "Volume Direction", "Price Direction"]
+            st.dataframe(df, use_container_width=True, hide_index=True)
         else:
-            st.caption("Date: Unknown")
-            st.info("Click 'Sync Historical Data' above to initialize this table.")
-        st.markdown('</div>', unsafe_allow_html=True)
+            st.info(f"No spikes crossed RVOL ≥ {RVOL_THRESHOLD} on this day.")
+    else:
+        st.caption("Date: Unknown")
+        st.info("Click 'Sync Historical Data' above to initialize this table.")
+    st.markdown('</div>', unsafe_allow_html=True)
