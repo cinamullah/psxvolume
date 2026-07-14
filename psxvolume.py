@@ -8,10 +8,6 @@ from datetime import datetime, timedelta, time as dtime
 from zoneinfo import ZoneInfo
 
 # ── Self-contained dark theme setup ─────────────────────────────────────
-# Streamlit only reads theme settings from .streamlit/config.toml at process
-# startup, so we write it out here (next to this script) if it's missing.
-# This keeps everything in this one file — just run `streamlit run` and,
-# on the very first launch, restart once so the theme takes effect.
 _CONFIG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".streamlit")
 _CONFIG_PATH = os.path.join(_CONFIG_DIR, "config.toml")
 if not os.path.exists(_CONFIG_PATH):
@@ -21,7 +17,7 @@ if not os.path.exists(_CONFIG_PATH):
 
 # ── Configuration ────────────────────────────────────────────────────────
 DB_NAME = "volume_scanner.db"
-TZ = ZoneInfo("Asia/Karachi")          # PSX timezone
+TZ = ZoneInfo("Asia/Karachi")
 MARKET_OPEN = dtime(9, 15)
 MARKET_CLOSE = dtime(15, 30)
 RVOL_THRESHOLD = 1.0
@@ -51,58 +47,41 @@ def init_db():
         """)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS spikes (
-                date TEXT,
-                symbol TEXT,
-                rvol REAL,
-                price_change REAL,
-                volume_direction TEXT,
-                price_direction TEXT,
+                date TEXT, symbol TEXT, rvol REAL, price_change REAL,
+                volume_direction TEXT, price_direction TEXT,
                 UNIQUE(date, symbol)
             )
         """)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS live_snapshots (
-                snap_time TEXT,
-                symbol TEXT,
-                cum_volume REAL,
-                price REAL,
-                rvol REAL,
-                price_change REAL,
-                volume_direction TEXT,
-                price_direction TEXT,
-                vol_chg_1h REAL,
-                vol_chg_2h REAL,
+                snap_time TEXT, symbol TEXT, cum_volume REAL, price REAL,
+                rvol REAL, price_change REAL, volume_direction TEXT,
+                price_direction TEXT, vol_chg_1h REAL, vol_chg_2h REAL,
                 UNIQUE(snap_time, symbol)
             )
         """)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS meta (
-                key TEXT PRIMARY KEY,
-                value TEXT
+                key TEXT PRIMARY KEY, value TEXT
             )
         """)
         conn.commit()
-
 
 def get_meta(key):
     with sqlite3.connect(DB_NAME) as conn:
         row = conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
     return row[0] if row else None
 
-
 def set_meta(key, value):
     with sqlite3.connect(DB_NAME) as conn:
         conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (key, value))
         conn.commit()
 
-
 # ── Helpers ──────────────────────────────────────────────────────────────
 def is_market_open(now):
     return now.weekday() < 5 and MARKET_OPEN <= now.time() <= MARKET_CLOSE
 
-
 def direction_labels(change):
-    """Returns an up/down/flat label for a numeric change value."""
     if change is None or pd.isna(change):
         return "— N/A"
     if change > 0:
@@ -111,10 +90,8 @@ def direction_labels(change):
         return "▼ Down"
     return "— Flat"
 
-
 # ── Historical Sync (once a day) ────────────────────────────────────────
 def sync_historical_data():
-    """Fetch daily historical data, calculate RVOL/price-change/direction, save to SQLite."""
     try:
         raw_data = yf.download(WATCHLIST, period="2mo", group_by='ticker', threads=True, progress=False)
     except Exception as e:
@@ -130,7 +107,6 @@ def sync_historical_data():
     last_days = trading_days[-5:]
 
     with sqlite3.connect(DB_NAME) as conn:
-        # idx 0 = most recent closed trading day (Yesterday), idx 1 = day before that, etc.
         for idx, d_str in enumerate(reversed(last_days)):
             conn.execute("INSERT OR REPLACE INTO trading_dates (idx, date) VALUES (?, ?)", (idx, d_str))
 
@@ -148,7 +124,6 @@ def sync_historical_data():
             rvol = df['Volume'] / sma_vol
             pct_change = df['Close'].pct_change() * 100
             vol_diff = df['Volume'].diff()
-
             clean_symbol = symbol.replace('.KA', '')
 
             for date, val in rvol.tail(5).items():
@@ -172,13 +147,8 @@ def sync_historical_data():
     set_meta("last_sync_time", datetime.now(TZ).isoformat())
     return True
 
-
 # ── Live Scan (every 15 min during market hours) ────────────────────────
 def fetch_tv_snapshot():
-    """Pull a live snapshot (price, volume, % change, relative volume) for the
-    watchlist from the TradingView scanner API. TradingView computes relative
-    volume itself (vs its own 10-day average), so we don't need to derive it
-    from Yahoo daily history the way the old Yahoo-intraday approach did."""
     tv_symbols = ["PSX:" + s.replace(".KA", "") for s in WATCHLIST]
     payload = {
         "symbols": {"tickers": tv_symbols, "query": {"types": []}},
@@ -211,9 +181,7 @@ def fetch_tv_snapshot():
         }
     return snapshot
 
-
 def _snapshot_before(conn, symbol, today_str, cutoff_dt):
-    """Most recent stored live_snapshots row for `symbol` today, at or before cutoff_dt."""
     cutoff_str = cutoff_dt.strftime('%Y-%m-%d %H:%M')
     return conn.execute("""
         SELECT cum_volume, price FROM live_snapshots
@@ -221,18 +189,10 @@ def _snapshot_before(conn, symbol, today_str, cutoff_dt):
         ORDER BY snap_time DESC LIMIT 1
     """, (symbol, f"{today_str}%", cutoff_str)).fetchone()
 
-
 def scan_live_data():
-    """Pull a live snapshot from TradingView and store RVOL / direction metrics.
-    Direction and 1h/2h volume deltas are computed against our own previously
-    stored snapshots for today, since the scanner only gives a point-in-time read."""
     now = datetime.now(TZ)
     tv_data = fetch_tv_snapshot()
     if not tv_data:
-        st.warning(
-            "No live data returned from TradingView. Either the market is closed right "
-            "now, or the request was blocked/rate-limited — try again in a moment."
-        )
         return False
 
     today_str = now.strftime('%Y-%m-%d')
@@ -277,82 +237,30 @@ def scan_live_data():
     set_meta("last_scan_time", now.isoformat())
     return True
 
-
 # ── Page Setup & Styling ─────────────────────────────────────────────────
-st.set_page_config(layout="wide", page_title="PSX Volume Spike Scanner")
+st.set_page_config(layout="wide", page_title="PSX Scanner")
 init_db()
 
 st.markdown("""
 <style>
-    :root {
-        --border: #333844;
-        --muted: #a3a8b4;
-        --accent: #ff4b4b;
-    }
-    .block-container {
-        padding-top: 1.5rem;
-        padding-bottom: 1.5rem;
-        max-width: 1150px;
-    }
-    h1, h2, h3, h4 {
-        font-family: Georgia, 'Times New Roman', serif;
-        letter-spacing: 0.2px;
-    }
-    .report-header {
-        border-bottom: 1px solid var(--border);
-        padding-bottom: 8px;
-        margin-bottom: 10px;
-    }
-    .report-header h1 {
-        font-size: 1.5rem;
-        margin: 0 0 4px 0;
-    }
-    .report-header .caption-line {
-        font-family: Georgia, 'Times New Roman', serif;
-        font-size: 0.85rem;
-        color: var(--muted);
-        margin: 0;
-        line-height: 1.4;
-    }
-    .section-title {
-        font-family: Georgia, 'Times New Roman', serif;
-        font-size: 0.95rem;
-        font-weight: 700;
-        color: var(--accent);
-        text-transform: uppercase;
-        letter-spacing: 0.6px;
-        margin: 16px 0 6px 0;
-        border-bottom: 1px solid var(--border);
-        padding-bottom: 4px;
-    }
-    .section-card {
-        background-color: #1a1d24;
-        border: 1px solid var(--border);
-        border-radius: 4px;
-        padding: 10px 14px 6px 14px;
-        margin-bottom: 6px;
-    }
-    .section-card p[data-testid="stCaptionContainer"] {
-        font-size: 0.82rem !important;
-        margin-bottom: 6px !important;
-    }
-    .status-line {
-        font-family: Georgia, 'Times New Roman', serif;
-        font-size: 0.8rem;
-        color: var(--muted);
-        margin: 4px 0 14px 0;
-    }
-    div[data-testid="stVerticalBlock"] { gap: 0.5rem !important; }
+    :root { --border: #333844; --muted: #a3a8b4; --accent: #ff4b4b; }
+    .block-container { padding-top: 0.5rem; padding-bottom: 0.5rem; max-width: 1150px; }
+    h1, h2, h3, h4 { font-family: Georgia, 'Times New Roman', serif; letter-spacing: 0.2px; }
+    .report-header { border-bottom: 1px solid var(--border); padding-bottom: 3px; margin-bottom: 3px; }
+    .report-header h1 { font-size: 1.1rem; margin: 0; }
+    .report-header .caption-line { font-family: Georgia, 'Times New Roman', serif; font-size: 0.7rem; color: var(--muted); margin: 0; line-height: 1.2; }
+    .section-title { font-family: Georgia, 'Times New Roman', serif; font-size: 0.75rem; font-weight: 700; color: var(--accent); text-transform: uppercase; letter-spacing: 0.4px; margin: 6px 0 2px 0; border-bottom: 1px solid var(--border); padding-bottom: 2px; }
+    .section-card { background-color: #1a1d24; border: 1px solid var(--border); border-radius: 3px; padding: 4px 8px 2px 8px; margin-bottom: 3px; }
+    .section-card p[data-testid="stCaptionContainer"] { font-size: 0.65rem !important; margin-bottom: 2px !important; }
+    .status-line { font-family: Georgia, 'Times New Roman', serif; font-size: 0.65rem; color: var(--muted); margin: 2px 0 4px 0; }
+    div[data-testid="stVerticalBlock"] { gap: 0.15rem !important; }
     div[data-testid="stElementToolbar"] { display: none; }
-    div[data-testid="stDataFrame"] { font-size: 0.85rem; }
-    div[data-testid="stButton"] button {
-        font-size: 0.85rem;
-        padding: 0.3rem 0.75rem;
-    }
-    div[data-testid="stAlert"] {
-        padding: 8px 12px;
-        font-size: 0.85rem;
-    }
+    div[data-testid="stDataFrame"] { font-size: 0.72rem; }
+    div[data-testid="stDataFrame"] td, div[data-testid="stDataFrame"] th { padding: 0.1rem 0.3rem !important; }
+    div[data-testid="stButton"] button { font-size: 0.72rem; padding: 0.1rem 0.4rem; min-height: 0; }
+    div[data-testid="stAlert"] { padding: 3px 6px; font-size: 0.72rem; }
+    div.stSpinner > div { margin: 0; }
+    .stApp header { display: none; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -362,47 +270,42 @@ market_open = is_market_open(now)
 st.markdown(f"""
 <div class="report-header">
     <h1>PSX Volume Spike Report</h1>
-    <p class="caption-line">Relative Volume threshold ≥ {RVOL_THRESHOLD} &nbsp;·&nbsp; Karachi time: {now.strftime('%Y-%m-%d %H:%M:%S')} &nbsp;·&nbsp; 
-    Market {'🟢 OPEN' if market_open else '🔴 CLOSED'} (session 9:15–15:30)</p>
+    <p class="caption-line">RVOL ≥ {RVOL_THRESHOLD} · {now.strftime('%Y-%m-%d %H:%M')} ·
+    {'🟢 Open' if market_open else '🔴 Closed'} (9:15–15:30) · {SNAPSHOT_INTERVAL_MIN}m refresh</p>
 </div>
 """, unsafe_allow_html=True)
 
-# Auto-refresh the page every 15 minutes while the market is open, so the live
-# section keeps itself current without the user needing to click anything.
 if market_open:
     st.markdown(f'<meta http-equiv="refresh" content="{SNAPSHOT_INTERVAL_MIN * 60}">', unsafe_allow_html=True)
 
-# ── Buttons ──────────────────────────────────────────────────────────────
-col_a, col_b, col_c = st.columns([1, 1, 4])
+col_a, col_b, col_c = st.columns([1, 1, 6])
 with col_a:
     scan_clicked = st.button("Scan", use_container_width=True)
 with col_b:
     sync_clicked = st.button("Sync", use_container_width=True)
 
 if scan_clicked:
-    with st.spinner("Scanning live market data..."):
+    with st.spinner("Scanning..."):
         if scan_live_data():
-            st.success("Live scan complete.")
+            st.success("OK")
             st.rerun()
 
 if sync_clicked:
     last_sync_date = get_meta("last_sync_date")
     today_str = now.strftime('%Y-%m-%d')
     if last_sync_date == today_str:
-        st.info("Historical data was already synced today. Re-syncing anyway.")
-    with st.spinner("Processing historical data..."):
+        st.info("Already synced today. Re-syncing.")
+    with st.spinner("Syncing..."):
         if sync_historical_data():
-            st.success("Historical data synced successfully!")
+            st.success("Synced")
             st.rerun()
 
-# Auto-sync historical data once per day, without requiring a click.
 if not sync_clicked:
     today_str = now.strftime('%Y-%m-%d')
     if get_meta("last_sync_date") != today_str:
-        with st.spinner("Auto-syncing historical data (once per day)..."):
+        with st.spinner("Auto-sync..."):
             sync_historical_data()
 
-# Auto-scan once every 15 minutes during market hours, without requiring a click.
 if market_open and not scan_clicked:
     last_scan_str = get_meta("last_scan_time")
     should_scan = True
@@ -414,14 +317,13 @@ if market_open and not scan_clicked:
         except ValueError:
             pass
     if should_scan:
-        with st.spinner("Auto-scanning live market data (15-min cycle)..."):
+        with st.spinner("Auto-scan..."):
             scan_live_data()
 
 last_scan_time = get_meta("last_scan_time")
 last_sync_time = get_meta("last_sync_date")
 st.markdown(
-    f'<p class="status-line">Last live scan: {last_scan_time or "never"} &nbsp;·&nbsp; '
-    f'Last historical sync: {last_sync_time or "never"}</p>',
+    f'<p class="status-line">Scan: {last_scan_time or "—"} · Sync: {last_sync_time or "—"}</p>',
     unsafe_allow_html=True
 )
 
@@ -442,16 +344,14 @@ if not live_df.empty:
     latest_time = live_df['snap_time'].max()
     live_df = live_df[live_df['snap_time'] == latest_time].drop(columns=['snap_time'])
     live_df = live_df.sort_values('rvol', ascending=False)
-    st.caption(f"{len(live_df)} symbol(s) crossing RVOL ≥ {RVOL_THRESHOLD} · as of {latest_time} (PKT) · "
-               f"refreshes every {SNAPSHOT_INTERVAL_MIN} min while market is open")
-    live_df.columns = ["Symbol", "Relative Volume", "Price Change %", "Volume Direction",
-                        "Price Direction", "Vol Δ vs 1H Ago %", "Vol Δ vs 2H Ago %"]
+    st.caption(f"{len(live_df)} sym · {latest_time.split(' ')[1]} · RVOL≥{RVOL_THRESHOLD}")
+    live_df.columns = ["Sym", "RVOL", "Chg%", "Vol Dir", "Pr Dir", "1H Vol Δ%", "2H Vol Δ%"]
     st.dataframe(live_df, use_container_width=True, hide_index=True)
 else:
-    st.info(f"No spikes crossing RVOL ≥ {RVOL_THRESHOLD} yet today. Click 'Scan' during market hours (9:15–15:30 PKT).")
+    st.info("No spikes yet today.")
 st.markdown('</div>', unsafe_allow_html=True)
 
-# ── Sections 2 & 3: Yesterday / Two Days Ago (Historical, stacked) ──────
+# ── Sections: Yesterday / Two Days Ago ──────────────────────────────────
 with sqlite3.connect(DB_NAME) as conn:
     hist_dates = [row[0] for row in
                   conn.execute("SELECT date FROM trading_dates ORDER BY idx ASC LIMIT 2").fetchall()]
@@ -463,7 +363,7 @@ for i in range(2):
     st.markdown('<div class="section-card">', unsafe_allow_html=True)
     if i < len(hist_dates):
         target_date = hist_dates[i]
-        st.caption(f"Date: {target_date}")
+        st.caption(target_date)
 
         with sqlite3.connect(DB_NAME) as conn:
             df = pd.read_sql("""
@@ -472,12 +372,11 @@ for i in range(2):
             """, conn, params=(target_date,))
 
         if not df.empty:
-            df.columns = ["Symbol", "Relative Volume", "Price Change %",
-                          "Volume Direction", "Price Direction"]
+            df.columns = ["Sym", "RVOL", "Chg%", "Vol Dir", "Pr Dir"]
             st.dataframe(df, use_container_width=True, hide_index=True)
         else:
-            st.info(f"No spikes crossed RVOL ≥ {RVOL_THRESHOLD} on this day.")
+            st.info(f"No spikes RVOL ≥ {RVOL_THRESHOLD}.")
     else:
-        st.caption("Date: Unknown")
-        st.info("Click 'Sync' above to initialize this table.")
+        st.caption("—")
+        st.info("Sync to initialize.")
     st.markdown('</div>', unsafe_allow_html=True)
