@@ -99,9 +99,6 @@ def is_market_open():
 
 # ── Historical sync ──────────────────────────────────────────────────────────
 def sync_historical_data(days=30):
-    """Backfill daily_volume with real historical daily volume per symbol,
-    via Yahoo Finance (PSX tickers use the .KA suffix there). Missing/failed
-    tickers are silently skipped. Returns (num_synced, num_skipped)."""
     import yfinance as yf
 
     conn = get_db()
@@ -135,7 +132,7 @@ def fetch_live_data():
     payload = {
         "filter": [{"left": "exchange", "operation": "equal", "right": "PSX"}],
         "columns": TV_COLS,
-        "range": [0, 500],
+        "range": [0, 1000],  # FIX: Increased range to ensure all >500 tickers are pulled
     }
     try:
         resp = requests.post(TV_SCAN_URL, json=payload, timeout=20)
@@ -195,8 +192,16 @@ def get_top_spikes_for_date(conn, date):
 # ── Core scan cycle ──────────────────────────────────────────────────────────
 def run_scan_cycle():
     conn = get_db()
-    now = datetime.now()
-    today, ts, time_key = now.strftime("%Y-%m-%d"), now.isoformat(timespec="seconds"), now.strftime("%H:%M")
+    now = datetime.now(PKT)  # FIX: Enforced PKT to prevent timezone mismatch
+    today = now.strftime("%Y-%m-%d")
+
+    # FIX: Bucket times down to the 15 min mark so historical matching finds exact time_keys
+    bucket_minute = (now.minute // 15) * 15
+    bucket = now.replace(minute=bucket_minute, second=0, microsecond=0)
+    
+    bucket_ts = bucket.isoformat(timespec="seconds") 
+    time_key = bucket.strftime("%H:%M")
+    actual_ts = now.isoformat(timespec="seconds") # Used for exact 'updated_at' logging
 
     live = fetch_live_data()
     if not live:
@@ -212,20 +217,22 @@ def run_scan_cycle():
             (today, symbol, day_volume),
         )
 
+        # Uses bucket_ts to ensure we fetch the interval ending *prior* to our current bucket
         prev = conn.execute(
             "SELECT volume FROM intraday_reading WHERE symbol=? AND ts<? AND ts LIKE ? ORDER BY ts DESC LIMIT 1",
-            (symbol, ts, f"{today}%"),
+            (symbol, bucket_ts, f"{today}%"),
         ).fetchone()
+        
         if prev is not None:
             interval_volume, first_reading_of_day = max(0.0, day_volume - prev["volume"]), False
         else:
-            # First poll of the day: day_volume is session-to-date, not a
-            # real 15-min slice, so don't treat it as a trend signal.
             interval_volume, first_reading_of_day = None, True
 
+        # Insert using bucket_ts. If user spams manual scan, this will safely REPLACE 
+        # the row in the current 15 min bucket instead of shrinking interval_volume to zero.
         conn.execute(
             "INSERT OR REPLACE INTO intraday_reading (ts, time_key, symbol, price, volume, interval_volume) VALUES (?,?,?,?,?,?)",
-            (ts, time_key, symbol, price, day_volume, interval_volume if interval_volume is not None else 0.0),
+            (bucket_ts, time_key, symbol, price, day_volume, interval_volume if interval_volume is not None else 0.0),
         )
 
         avg_vol_20d = get_avg_daily_volume(conn, symbol, today)
@@ -233,7 +240,8 @@ def run_scan_cycle():
         is_candidate = bool(rvol is not None and rvol >= RVOL_SPIKE_THRESHOLD)
 
         trend, signal = "Neutral", "Neutral"
-        avg_interval_vol = get_avg_interval_volume(conn, symbol, time_key, ts)
+        avg_interval_vol = get_avg_interval_volume(conn, symbol, time_key, bucket_ts)
+        
         if is_candidate and not first_reading_of_day:
             prev_state = conn.execute("SELECT last_interval_vol, price FROM spike_state WHERE symbol=?", (symbol,)).fetchone()
             prev_interval_vol = prev_state["last_interval_vol"] if prev_state else None
@@ -258,7 +266,7 @@ def run_scan_cycle():
             "price=excluded.price, day_volume=excluded.day_volume, avg_volume_20d=excluded.avg_volume_20d, "
             "rvol=excluded.rvol, is_candidate=excluded.is_candidate, trend=excluded.trend, signal=excluded.signal, "
             "last_interval_vol=excluded.last_interval_vol, avg_interval_vol=excluded.avg_interval_vol, updated_at=excluded.updated_at",
-            (symbol, price, day_volume, avg_vol_20d, rvol, int(is_candidate), trend, signal, interval_volume, avg_interval_vol, ts),
+            (symbol, price, day_volume, avg_vol_20d, rvol, int(is_candidate), trend, signal, interval_volume, avg_interval_vol, actual_ts),
         )
 
     conn.commit()
@@ -271,32 +279,31 @@ init_db()
 
 if "last_scan" not in st.session_state:
     st.session_state.last_scan = 0
-if is_market_open() and (datetime.now().timestamp() - st.session_state.last_scan) >= POLL_SECONDS:
+if is_market_open() and (datetime.now(PKT).timestamp() - st.session_state.last_scan) >= POLL_SECONDS:
     with st.spinner("Scanning..."):
         run_scan_cycle()
-    st.session_state.last_scan = datetime.now().timestamp()
+    st.session_state.last_scan = datetime.now(PKT).timestamp()
 
 st.caption(f"📊 KSE-100 · RVOL ≥ {RVOL_SPIKE_THRESHOLD}x · Top {TOP_N} · "
            f"Market {'🟢 open' if is_market_open() else '🔴 closed'} (9:15–3:30 PM PKT)")
 
 col1, col2 = st.columns(2)
-if col1.button("🔍 Scan", width="stretch"):
+
+# FIX: Replaced invalid `width="stretch"` with standard Streamlit kwarg `use_container_width=True`
+if col1.button("🔍 Scan", use_container_width=True):
     with st.spinner("Scanning..."):
         run_scan_cycle()
-    st.session_state.last_scan = datetime.now().timestamp()
+    st.session_state.last_scan = datetime.now(PKT).timestamp()
     st.rerun()
-if col2.button("⬇️ Sync", width="stretch"):
+if col2.button("⬇️ Sync", use_container_width=True):
     with st.spinner("Syncing history..."):
         synced, skipped = sync_historical_data()
     st.toast(f"Synced {synced} symbols" + (f", skipped {skipped}" if skipped else ""))
     st.rerun()
 
 conn = get_db()
-_today_str = datetime.now().strftime("%Y-%m-%d")
+_today_str = datetime.now(PKT).strftime("%Y-%m-%d") # FIX: Enforced PKT
 
-# "Today" prefers live spike_state (has price/trend/signal from actual scans),
-# but falls back to daily_volume-derived spikes for today's date if a Sync
-# has run today but no live Scan has happened yet (e.g. before market open).
 today_rows = conn.execute(
     "SELECT symbol AS Symbol, price AS Price, rvol AS RVOL, day_volume AS [Day Volume], "
     "avg_volume_20d AS [20d Avg Vol], trend AS Trend, signal AS Signal FROM spike_state "
@@ -304,12 +311,9 @@ today_rows = conn.execute(
     "ORDER BY rvol DESC LIMIT ?",
     (f"{_today_str}%", TOP_N),
 ).fetchall()
-today_rows = [dict(r) for r in today_rows] or get_top_spikes_for_date(conn, _today_str)
+today_rows = [dict(r) for r in today_rows]
 
-# "Yesterday" / "2 days ago" are anchored to the real calendar date, not to
-# whatever happens to be the most recent row in daily_volume — otherwise a
-# Sync without a same-day Scan silently mislabels which day is which.
-all_dates = get_trading_dates(conn, limit=40)  # generous window to search back through
+all_dates = get_trading_dates(conn, limit=40)
 past_dates = [d for d in all_dates if d != _today_str]
 yesterday_date = past_dates[0] if len(past_dates) > 0 else None
 two_days_ago_date = past_dates[1] if len(past_dates) > 1 else None
@@ -333,7 +337,6 @@ _COL_CFG = {
     "Symbol": st.column_config.TextColumn("Symbol", width="small"),
 }
 
-
 def show(label, rows):
     st.caption(label)
     if not rows:
@@ -344,7 +347,6 @@ def show(label, rows):
         pd.DataFrame(df), hide_index=True, width="stretch",
         row_height=28, height=28 * len(df) + 38, column_config=_COL_CFG,
     )
-
 
 show(f"Today ({_today_str})", today_rows)
 show(f"Yesterday ({yesterday_date})" if yesterday_date else "Yesterday", yesterday_rows)
