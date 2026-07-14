@@ -24,7 +24,7 @@ DB_NAME = "volume_scanner.db"
 TZ = ZoneInfo("Asia/Karachi")          # PSX timezone
 MARKET_OPEN = dtime(9, 15)
 MARKET_CLOSE = dtime(15, 30)
-RVOL_THRESHOLD = 1.5
+RVOL_THRESHOLD = 1.0
 SNAPSHOT_INTERVAL_MIN = 15
 TV_URL = "https://scanner.tradingview.com/pakistan/scan"
 
