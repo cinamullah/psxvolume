@@ -1,9 +1,10 @@
 import streamlit as st
 import yfinance as yf
+import requests
 import sqlite3
 import pandas as pd
 import os
-from datetime import datetime, time as dtime
+from datetime import datetime, timedelta, time as dtime
 from zoneinfo import ZoneInfo
 
 # ── Self-contained dark theme setup ─────────────────────────────────────
@@ -26,6 +27,7 @@ MARKET_CLOSE = dtime(15, 30)
 RVOL_THRESHOLD = 1.5
 TOP_N_LIVE = 15
 SNAPSHOT_INTERVAL_MIN = 15
+TV_URL = "https://scanner.tradingview.com/pakistan/scan"
 
 WATCHLIST = [
     "ABL.KA", "ABOT.KA", "AGP.KA", "AICL.KA", "AIRLINK.KA", "AKBL.KA", "ATLH.KA",
@@ -111,19 +113,6 @@ def direction_labels(change):
     return "— Flat"
 
 
-def trading_fraction_elapsed(now):
-    """Fraction of today's trading session that has elapsed, used to annualize live volume."""
-    open_dt = datetime.combine(now.date(), MARKET_OPEN, tzinfo=TZ)
-    close_dt = datetime.combine(now.date(), MARKET_CLOSE, tzinfo=TZ)
-    if now <= open_dt:
-        return 0.02
-    if now >= close_dt:
-        return 1.0
-    total = (close_dt - open_dt).total_seconds()
-    elapsed = (now - open_dt).total_seconds()
-    return max(elapsed / total, 0.02)
-
-
 # ── Historical Sync (once a day) ────────────────────────────────────────
 def sync_historical_data():
     """Fetch daily historical data, calculate RVOL/price-change/direction, save to SQLite."""
@@ -186,106 +175,100 @@ def sync_historical_data():
 
 
 # ── Live Scan (every 15 min during market hours) ────────────────────────
-def get_reference_data():
-    """20-day average daily volume + last completed close, per symbol, from daily history."""
+def fetch_tv_snapshot():
+    """Pull a live snapshot (price, volume, % change, relative volume) for the
+    watchlist from the TradingView scanner API. TradingView computes relative
+    volume itself (vs its own 10-day average), so we don't need to derive it
+    from Yahoo daily history the way the old Yahoo-intraday approach did."""
+    tv_symbols = ["PSX:" + s.replace(".KA", "") for s in WATCHLIST]
+    payload = {
+        "symbols": {"tickers": tv_symbols, "query": {"types": []}},
+        "columns": ["close", "volume", "change", "relative_volume_10d_calc"],
+    }
     try:
-        hist = yf.download(WATCHLIST, period="2mo", group_by='ticker', threads=True, progress=False)
+        resp = requests.post(TV_URL, json=payload, timeout=15,
+                              headers={"Content-Type": "application/json"})
+        resp.raise_for_status()
+        rows = resp.json().get("data", [])
     except Exception as e:
-        st.error(f"Failed to download reference data: {e}")
-        return {}, {}
+        st.error(f"Failed to fetch live data from TradingView: {e}")
+        return {}
 
-    today_str = datetime.now(TZ).strftime('%Y-%m-%d')
-    avg_vol, prev_close = {}, {}
-    for symbol in WATCHLIST:
-        if symbol not in hist:
+    snapshot = {}
+    for row in rows:
+        tv_symbol = row.get("s", "")
+        clean_symbol = tv_symbol.replace("PSX:", "")
+        vals = row.get("d") or []
+        if len(vals) < 4:
             continue
-        df = hist[symbol].dropna(subset=['Volume', 'Close'])
-        if df.empty:
+        close, volume, change, rvol = vals[0], vals[1], vals[2], vals[3]
+        if close is None or volume is None or rvol is None:
             continue
-        # Exclude an in-progress "today" row if present, so prev_close is truly the last close.
-        completed = df[df.index.strftime('%Y-%m-%d') < today_str]
-        base = completed if not completed.empty else df
-        avg_vol[symbol] = base['Volume'].tail(20).mean()
-        prev_close[symbol] = base['Close'].iloc[-1]
-    return avg_vol, prev_close
+        snapshot[clean_symbol] = {
+            "price": float(close),
+            "cum_volume": float(volume),
+            "price_change": round(float(change), 2) if change is not None else None,
+            "rvol": round(float(rvol), 2),
+        }
+    return snapshot
+
+
+def _snapshot_before(conn, symbol, today_str, cutoff_dt):
+    """Most recent stored live_snapshots row for `symbol` today, at or before cutoff_dt."""
+    cutoff_str = cutoff_dt.strftime('%Y-%m-%d %H:%M')
+    return conn.execute("""
+        SELECT cum_volume, price FROM live_snapshots
+        WHERE symbol = ? AND snap_time LIKE ? AND snap_time <= ?
+        ORDER BY snap_time DESC LIMIT 1
+    """, (symbol, f"{today_str}%", cutoff_str)).fetchone()
 
 
 def scan_live_data():
-    """Pull today's intraday bars (15m) and compute live RVOL / direction metrics."""
+    """Pull a live snapshot from TradingView and store RVOL / direction metrics.
+    Direction and 1h/2h volume deltas are computed against our own previously
+    stored snapshots for today, since the scanner only gives a point-in-time read."""
     now = datetime.now(TZ)
-    avg_vol_map, prev_close_map = get_reference_data()
-    if not avg_vol_map:
+    tv_data = fetch_tv_snapshot()
+    if not tv_data:
         st.warning(
-            "Couldn't build reference volumes/prices, so live RVOL can't be computed. "
-            "This usually means historical data hasn't been synced yet — click "
-            "'Sync Historical Data' first, then try 'Scan Live' again."
+            "No live data returned from TradingView. Either the market is closed right "
+            "now, or the request was blocked/rate-limited — try again in a moment."
         )
         return False
 
-    try:
-        intraday = yf.download(WATCHLIST, period="1d", interval="15m", group_by='ticker',
-                                threads=True, progress=False)
-    except Exception as e:
-        st.error(f"Failed to download live intraday data: {e}")
-        return False
-
-    sample_ticker = WATCHLIST[0]
-    if sample_ticker not in intraday or intraday[sample_ticker].empty:
-        st.warning(
-            "No 15-minute intraday data returned for the watchlist. Either the market is "
-            "closed right now, or Yahoo Finance doesn't have intraday coverage for these "
-            "PSX (.KA) tickers at this moment — daily data can still work fine even when "
-            "intraday doesn't."
-        )
-        return False
-
-    fraction = trading_fraction_elapsed(now)
+    today_str = now.strftime('%Y-%m-%d')
     snap_time = now.strftime('%Y-%m-%d %H:%M')
 
     with sqlite3.connect(DB_NAME) as conn:
-        for symbol in WATCHLIST:
-            if symbol not in intraday:
-                continue
-            df = intraday[symbol].dropna(subset=['Volume', 'Close'])
-            if df.empty:
-                continue
+        for clean_symbol, vals in tv_data.items():
+            cum_volume = vals["cum_volume"]
+            price = vals["price"]
+            price_change = vals["price_change"]
+            rvol = vals["rvol"]
 
-            clean_symbol = symbol.replace('.KA', '')
-            cum_volume = float(df['Volume'].sum())
-            last_price = float(df['Close'].iloc[-1])
-
-            avg_daily_vol = avg_vol_map.get(symbol)
-            prev_close = prev_close_map.get(symbol)
-            if not avg_daily_vol or avg_daily_vol == 0:
-                continue
-
-            rvol = cum_volume / (avg_daily_vol * fraction)
-            price_change = ((last_price - prev_close) / prev_close) * 100 if prev_close else None
-            price_change = round(price_change, 2) if price_change is not None else None
-
-            if len(df) >= 2:
-                volume_direction = "▲ Rising" if df['Volume'].iloc[-1] > df['Volume'].iloc[-2] else "▼ Falling"
-                price_direction = direction_labels(df['Close'].iloc[-1] - df['Close'].iloc[-2])
+            prev_row = _snapshot_before(conn, clean_symbol, today_str, now - timedelta(minutes=1))
+            if prev_row:
+                volume_direction = "▲ Rising" if cum_volume > prev_row[0] else "▼ Falling"
+                price_direction = direction_labels(price - prev_row[1])
             else:
                 volume_direction = "— N/A"
                 price_direction = "— N/A"
 
-            def pct_change_since(bars_back):
-                if len(df) > bars_back:
-                    past_cum = df['Volume'].iloc[:len(df) - bars_back].sum()
-                    if past_cum > 0:
-                        return round(((cum_volume - past_cum) / past_cum) * 100, 2)
+            def pct_change_vs(cutoff_dt):
+                row = _snapshot_before(conn, clean_symbol, today_str, cutoff_dt)
+                if row and row[0]:
+                    return round(((cum_volume - row[0]) / row[0]) * 100, 2)
                 return None
 
-            vol_chg_1h = pct_change_since(4)   # 4 x 15min = 1 hour
-            vol_chg_2h = pct_change_since(8)   # 8 x 15min = 2 hours
+            vol_chg_1h = pct_change_vs(now - timedelta(minutes=60))
+            vol_chg_2h = pct_change_vs(now - timedelta(minutes=120))
 
             conn.execute("""
                 INSERT OR REPLACE INTO live_snapshots
                 (snap_time, symbol, cum_volume, price, rvol, price_change,
                  volume_direction, price_direction, vol_chg_1h, vol_chg_2h)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (snap_time, clean_symbol, cum_volume, last_price, round(rvol, 2), price_change,
+            """, (snap_time, clean_symbol, cum_volume, price, rvol, price_change,
                   volume_direction, price_direction, vol_chg_1h, vol_chg_2h))
         conn.commit()
 
