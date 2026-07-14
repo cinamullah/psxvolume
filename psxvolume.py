@@ -4,6 +4,7 @@ import requests
 import sqlite3
 import pandas as pd
 import os
+import html
 from datetime import datetime, timedelta, time as dtime
 from zoneinfo import ZoneInfo
 
@@ -41,8 +42,7 @@ def init_db():
     with sqlite3.connect(DB_NAME) as conn:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS trading_dates (
-                idx INTEGER PRIMARY KEY,
-                date TEXT UNIQUE
+                idx INTEGER PRIMARY KEY, date TEXT UNIQUE
             )
         """)
         conn.execute("""
@@ -233,170 +233,146 @@ def scan_live_data():
     return True
 
 # ══════════════════════════════════════════════════════════════════════════
-#  UI
+#  UI  (inspired by psx-scanner.py)
 # ══════════════════════════════════════════════════════════════════════════
-st.set_page_config(layout="wide", page_title="PSX Scanner")
+st.set_page_config(layout="wide", page_title="PSX Volume Spike Scanner")
 init_db()
 
 st.markdown("""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Libre+Baskerville:ital,wght@0,400;0,700;1,400&family=JetBrains+Mono:wght@400;500;600;700&family=Inter:wght@300;400;500;600;700&display=swap');
 
-* { font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; }
-
-.block-container {
-    padding-top: 2rem;
-    padding-bottom: 2rem;
-    max-width: 1000px;
-    background: #0a0a0f;
-    min-height: 100vh;
+* { box-sizing: border-box; }
+html, body, [class*="css"] {
+    background: #060a14 !important;
+    color: #d8dde8 !important;
+    font-family: 'Inter', -apple-system, sans-serif !important;
 }
-
-/* ── Header ── */
-.header {
-    text-align: center;
-    padding: 1.5rem 0 1rem 0;
-    margin-bottom: 1.5rem;
-    border-bottom: 1px solid #1e1e2e;
-}
-.header h1 {
-    font-size: 1.6rem;
-    font-weight: 700;
-    margin: 0;
-    background: linear-gradient(135deg, #a78bfa, #818cf8);
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
-    background-clip: text;
-    letter-spacing: -0.02em;
-}
-.header .subtitle {
-    font-size: 0.8rem;
-    color: #6b7280;
-    margin: 0.4rem 0 0 0;
-    font-weight: 400;
-}
-.header .subtitle span {
-    display: inline-block;
-    margin: 0 0.4rem;
+footer, #MainMenu, [data-testid="stToolbar"] { visibility: hidden !important; }
+.main .block-container {
+    max-width: 1240px !important;
+    padding: 1.8rem 2.2rem !important;
+    margin: 0 auto !important;
 }
 
-/* ── Status Bar ── */
-.status-bar {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 1.5rem;
-    padding: 0.6rem;
-    background: linear-gradient(135deg, #111118, #161620);
-    border: 1px solid #1e1e2e;
-    border-radius: 12px;
-    margin-bottom: 1.5rem;
-    font-size: 0.78rem;
-    color: #9ca3af;
+/* ── Masthead ── */
+.report-masthead { padding-bottom: 2px; margin-bottom: 0; }
+.report-title {
+    font-family: 'Libre Baskerville', Georgia, serif;
+    font-size: 1.45rem; font-weight: 700;
+    letter-spacing: 0.18em; text-transform: uppercase;
+    background: linear-gradient(135deg, #e8ecf5 0%, #a0aec0 100%);
+    -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+    margin: 0; line-height: 1.2;
 }
-.status-item {
-    display: flex;
-    align-items: center;
-    gap: 0.4rem;
+.report-subtitle {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.68rem; color: #4a5568; margin-top: 3px; letter-spacing: 0.06em;
 }
-.status-dot {
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    display: inline-block;
-}
-.status-dot.open { background: #22c55e; box-shadow: 0 0 6px rgba(34,197,94,0.4); }
-.status-dot.closed { background: #ef4444; box-shadow: 0 0 6px rgba(239,68,68,0.4); }
 
-/* ── Buttons row ── */
-.btn-row {
-    display: flex;
-    gap: 0.75rem;
-    margin-bottom: 1.5rem;
+/* ── Divider ── */
+.double-rule { border-bottom: 3px double #1e2a3a; margin: 10px 0 16px; }
+
+/* ── Market Bar ── */
+.market-bar {
+    display: flex; justify-content: space-between; flex-wrap: wrap; gap: 4px;
+    border: 1px solid #1a2535; padding: 10px 20px;
+    margin-bottom: 12px; background: linear-gradient(135deg,#0a0f1e 0%,#0c1428 100%);
+    font-family: 'JetBrains Mono', monospace; font-size: 0.78rem;
+    box-shadow: 0 1px 12px rgba(0,0,0,0.4);
 }
+.market-item { text-align: center; min-width: 80px; }
+.market-label {
+    font-size: 0.58rem; font-weight: 700;
+    text-transform: uppercase; letter-spacing: 0.14em;
+    color: #4a5568; margin-bottom: 3px;
+}
+.market-value { font-size: 0.90rem; font-weight: 700; color: #d8dde8; }
 
 /* ── Section Headers ── */
-.section-title {
-    font-size: 0.7rem;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-    color: #6b7280;
-    margin: 1.2rem 0 0.5rem 0;
-    padding-left: 0.25rem;
+.section-header {
+    font-family: 'Libre Baskerville', Georgia, serif;
+    font-size: 0.92rem; font-weight: 700;
+    text-transform: uppercase; letter-spacing: 0.14em;
+    border-bottom: 2px solid #1e2a3a; padding-bottom: 5px;
+    margin-top: 28px; margin-bottom: 3px; color: #d8dde8;
+}
+.section-meta {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.64rem; color: #4a5568; margin-bottom: 10px; letter-spacing: 0.04em;
 }
 
 /* ── Card ── */
-.card {
-    background: linear-gradient(135deg, #111118, #161620);
-    border: 1px solid #1e1e2e;
-    border-radius: 12px;
+.data-card {
+    border: 1px solid #1a2535;
+    background: linear-gradient(135deg,#0a0f1e 0%,#0c1428 100%);
     padding: 1rem 1.2rem;
-    margin-bottom: 0.5rem;
-}
-.card .caption {
-    font-size: 0.7rem;
-    color: #6b7280;
-    margin-bottom: 0.6rem;
-    padding-bottom: 0.5rem;
-    border-bottom: 1px solid #1e1e2e;
-}
-
-/* ── Dataframe ── */
-div[data-testid="stDataFrame"] { font-size: 0.8rem; }
-div[data-testid="stDataFrame"] td {
-    padding: 0.35rem 0.5rem !important;
-    border-bottom: 1px solid #191924;
-    color: #d1d5db;
-}
-div[data-testid="stDataFrame"] th {
-    padding: 0.4rem 0.5rem !important;
-    background: #13131d;
-    color: #6b7280;
-    font-weight: 500;
-    font-size: 0.7rem;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    border-bottom: 1px solid #1e1e2e;
-}
-div[data-testid="stDataFrame"] tbody tr:hover { background: #1a1a28; }
-
-/* ── Buttons ── */
-div[data-testid="stButton"] button {
-    font-size: 0.8rem;
-    font-weight: 500;
-    padding: 0.4rem 1rem;
-    border-radius: 8px;
-    border: 1px solid #2a2a3e;
-    background: #161620;
-    color: #e5e7eb;
-    transition: all 0.15s ease;
-}
-div[data-testid="stButton"] button:hover {
-    background: #1f1f30;
-    border-color: #3a3a5e;
-    box-shadow: 0 0 12px rgba(129,140,248,0.15);
+    margin-bottom: 6px;
 }
 
 /* ── Alerts ── */
-div[data-testid="stAlert"] {
-    border-radius: 8px;
-    padding: 0.5rem 0.8rem;
-    font-size: 0.8rem;
-    border: 1px solid #1e1e2e;
+.paper-alert {
+    border: 1px solid rgba(248,113,113,0.28);
+    border-left: 4px solid #f87171;
+    padding: 8px 14px; margin-bottom: 12px;
+    font-size: 0.74rem; color: #fca5a5;
+    background: rgba(239,68,68,0.05);
+}
+.paper-info {
+    border: 1px solid #1a2535; border-left: 4px solid #243040;
+    padding: 8px 14px; margin-bottom: 12px;
+    font-size: 0.74rem; color: #8899aa;
+    background: rgba(10,15,30,0.5);
 }
 
-/* ── Spinner ── */
-div.stSpinner > div { margin: 0; }
+/* ── DataFrames ── */
+[data-testid="stDataFrame"] { background: transparent !important; border-radius: 0 !important; }
+[data-testid="stDataFrame"] > div { border: 1px solid #1a2535 !important; }
+thead tr th {
+    background: #09101f !important; color: #4a5568 !important;
+    font-family: 'JetBrains Mono', monospace !important;
+    font-size: 0.60rem !important; font-weight: 700 !important;
+    letter-spacing: 0.10em !important; text-transform: uppercase;
+    padding: 9px 7px !important; border-bottom: 2px solid #1e2a3a !important;
+}
+tbody tr { border-bottom: 1px solid #111928 !important; }
+tbody tr:nth-child(even) { background: rgba(10,15,30,0.35) !important; }
+tbody tr:hover { background: rgba(22,32,52,0.55) !important; }
+tbody td {
+    font-family: 'JetBrains Mono', monospace !important;
+    font-size: 0.69rem !important; color: #d8dde8 !important;
+    padding: 5px 7px !important;
+}
 
-/* ── Footer status ── */
-.footer-status {
-    text-align: center;
-    font-size: 0.7rem;
-    color: #4b5563;
-    margin-top: 1.5rem;
-    padding-top: 1rem;
-    border-top: 1px solid #1e1e2e;
+/* ── Buttons ── */
+.stButton button {
+    background: #09101f !important; border: 1px solid #1e2a3a !important;
+    border-radius: 0 !important; color: #d8dde8 !important;
+    padding: 5px 14px !important; font-family: 'JetBrains Mono', monospace !important;
+    font-size: 0.68rem !important; font-weight: 700 !important;
+    text-transform: uppercase !important; letter-spacing: 0.10em !important;
+    min-height: unset !important; line-height: 1.4 !important;
+    transition: all 0.15s ease !important;
+}
+.stButton button:hover {
+    background: #111928 !important; border-color: #2d4060 !important;
+    box-shadow: 0 0 8px rgba(96,165,250,0.12) !important;
+}
+
+/* ── Footer ── */
+.report-footer {
+    border-top: 1px solid #1a2535; margin-top: 40px; padding-top: 10px;
+    font-family: 'JetBrains Mono', monospace; font-size: 0.58rem;
+    color: #2d3a4a; line-height: 1.8;
+}
+
+div.stSpinner > div { margin: 0; }
+hr { border-color: #1a2535 !important; margin: 1.2rem 0 !important; }
+
+@media (max-width: 768px) {
+    .main .block-container { padding: 1rem !important; }
+    .report-title { font-size: 1.1rem; }
+    .market-bar { flex-wrap: wrap; gap: 8px; padding: 8px 12px; }
 }
 </style>
 """, unsafe_allow_html=True)
@@ -404,56 +380,84 @@ div.stSpinner > div { margin: 0; }
 now = datetime.now(TZ)
 market_open = is_market_open(now)
 
-st.markdown(f"""
-<div class="header">
-    <h1>PSX Volume Scanner</h1>
-    <p class="subtitle">
-        RVOL ≥ {RVOL_THRESHOLD} <span>·</span> {now.strftime('%A, %Y-%m-%d')} <span>·</span> {now.strftime('%H:%M')} PKT
-    </p>
-</div>
-""", unsafe_allow_html=True)
-
-st.markdown(f"""
-<div class="status-bar">
-    <div class="status-item">
-        <span class="status-dot {'open' if market_open else 'closed'}"></span>
-        Market {'Open' if market_open else 'Closed'} (9:15–15:30)
+# ── Header ───────────────────────────────────────────────────────────────
+head_cols = st.columns([8, 1, 1])
+with head_cols[0]:
+    st.markdown(f"""
+    <div class="report-masthead">
+        <div class="report-title">PSX Volume Spike Scanner</div>
+        <div class="report-subtitle">
+            Relative Volume &middot; Live & Historical &middot;
+            {now.strftime("%A, %B %d, %Y")} &middot; {now.strftime("%H:%M")} PKT
+        </div>
     </div>
-    <div class="status-item">🔄 Refresh {SNAPSHOT_INTERVAL_MIN}m</div>
+    """, unsafe_allow_html=True)
+with head_cols[1]:
+    st.markdown('<div style="padding-top:8px"></div>', unsafe_allow_html=True)
+    scan_clicked = st.button("SCAN", use_container_width=True)
+with head_cols[2]:
+    st.markdown('<div style="padding-top:8px"></div>', unsafe_allow_html=True)
+    sync_clicked = st.button("SYNC", use_container_width=True)
+
+st.markdown('<div class="double-rule"></div>', unsafe_allow_html=True)
+
+# ── Market Bar ───────────────────────────────────────────────────────────
+state_text = "OPEN ●" if market_open else "CLOSED"
+state_color = "#34d399" if market_open else "#8899aa"
+st.markdown(f"""
+<div class="market-bar">
+    <div class="market-item">
+        <div class="market-label">Market</div>
+        <div class="market-value" style="color:{state_color}">{state_text}</div>
+    </div>
+    <div class="market-item">
+        <div class="market-label">Session</div>
+        <div class="market-value">9:15 – 15:30</div>
+    </div>
+    <div class="market-item">
+        <div class="market-label">RVOL Threshold</div>
+        <div class="market-value">≥ {RVOL_THRESHOLD}x</div>
+    </div>
+    <div class="market-item">
+        <div class="market-label">Refresh</div>
+        <div class="market-value">{SNAPSHOT_INTERVAL_MIN} min</div>
+    </div>
+    <div class="market-item">
+        <div class="market-label">Watchlist</div>
+        <div class="market-value">{len(WATCHLIST)} sym</div>
+    </div>
 </div>
 """, unsafe_allow_html=True)
 
 if market_open:
     st.markdown(f'<meta http-equiv="refresh" content="{SNAPSHOT_INTERVAL_MIN * 60}">', unsafe_allow_html=True)
 
-col_a, col_b, col_c = st.columns([1, 1, 5])
-with col_a:
-    scan_clicked = st.button("Scan Live", use_container_width=True)
-with col_b:
-    sync_clicked = st.button("Sync History", use_container_width=True)
-
+# ── Actions ──────────────────────────────────────────────────────────────
 if scan_clicked:
-    with st.spinner("Scanning live market..."):
+    with st.spinner("Scanning live market data..."):
         if scan_live_data():
-            st.success("Live data refreshed")
             st.rerun()
 
 if sync_clicked:
     last_sync_date = get_meta("last_sync_date")
     today_str = now.strftime('%Y-%m-%d')
     if last_sync_date == today_str:
-        st.info("Already synced today.")
+        st.markdown(
+            '<div class="paper-info">Already synced today. Re-syncing.</div>',
+            unsafe_allow_html=True,
+        )
     with st.spinner("Syncing historical data..."):
         if sync_historical_data():
-            st.success("Historical data synced")
             st.rerun()
 
+# Auto-sync (once per day)
 if not sync_clicked:
     today_str = now.strftime('%Y-%m-%d')
     if get_meta("last_sync_date") != today_str:
-        with st.spinner("Auto-syncing..."):
+        with st.spinner("Auto-syncing historical data..."):
             sync_historical_data()
 
+# Auto-scan (every 15 min during market hours)
 if market_open and not scan_clicked:
     last_scan_str = get_meta("last_scan_time")
     should_scan = True
@@ -465,11 +469,12 @@ if market_open and not scan_clicked:
         except ValueError:
             pass
     if should_scan:
-        with st.spinner("Auto-scanning..."):
+        with st.spinner("Auto-scanning market data..."):
             scan_live_data()
 
-# ─── Today Live ──────────────────────────────────────────────────────────
-st.markdown('<div class="section-title">Live — Today</div>', unsafe_allow_html=True)
+# ── Today Live ───────────────────────────────────────────────────────────
+st.markdown('<div class="section-header"><b>Today</b> — Live Spikes</div>', unsafe_allow_html=True)
+
 today_str = now.strftime('%Y-%m-%d')
 with sqlite3.connect(DB_NAME) as conn:
     live_df = pd.read_sql("""
@@ -480,45 +485,62 @@ with sqlite3.connect(DB_NAME) as conn:
         ORDER BY snap_time DESC
     """, conn, params=(f"{today_str}%",))
 
-st.markdown('<div class="card">', unsafe_allow_html=True)
+st.markdown('<div class="data-card">', unsafe_allow_html=True)
 if not live_df.empty:
     latest_time = live_df['snap_time'].max()
     live_df = live_df[live_df['snap_time'] == latest_time].drop(columns=['snap_time'])
     live_df = live_df.sort_values('rvol', ascending=False)
     t = latest_time.split(' ')[1]
-    st.markdown(f'<div class="caption">{len(live_df)} symbols · {t} PKT</div>', unsafe_allow_html=True)
-    live_df.columns = ["Symbol", "RVOL", "Chg%", "Vol Dir", "Pr Dir", "1H Vol%", "2H Vol%"]
+    st.markdown(
+        f'<div class="section-meta" style="margin-bottom:6px">{len(live_df)} symbols &middot; {t} PKT</div>',
+        unsafe_allow_html=True,
+    )
+    live_df.columns = ["Symbol", "RVOL", "Chg %", "Vol Dir", "Pr Dir", "1H Vol Δ %", "2H Vol Δ %"]
     st.dataframe(live_df, use_container_width=True, hide_index=True)
 else:
-    st.info("No volume spikes detected yet today.")
+    st.markdown(
+        '<div class="paper-info">No volume spikes detected yet today.</div>',
+        unsafe_allow_html=True,
+    )
 st.markdown('</div>', unsafe_allow_html=True)
 
-# ─── Historical ──────────────────────────────────────────────────────────
+# ── Yesterday & Two Days Ago ────────────────────────────────────────────
 with sqlite3.connect(DB_NAME) as conn:
     hist_dates = [row[0] for row in
                   conn.execute("SELECT date FROM trading_dates ORDER BY idx ASC LIMIT 2").fetchall()]
 
 for i, title in enumerate(["Yesterday", "Two Days Ago"]):
-    st.markdown(f'<div class="section-title">{title}</div>', unsafe_allow_html=True)
-    st.markdown('<div class="card">', unsafe_allow_html=True)
+    st.markdown(f'<div class="section-header"><b>{title}</b></div>', unsafe_allow_html=True)
+    st.markdown('<div class="data-card">', unsafe_allow_html=True)
     if i < len(hist_dates):
         target_date = hist_dates[i]
-        st.markdown(f'<div class="caption">{target_date}</div>', unsafe_allow_html=True)
         with sqlite3.connect(DB_NAME) as conn:
             df = pd.read_sql("""
                 SELECT symbol, rvol, price_change, volume_direction, price_direction
                 FROM spikes WHERE date = ? ORDER BY rvol DESC
             """, conn, params=(target_date,))
         if not df.empty:
-            df.columns = ["Symbol", "RVOL", "Chg%", "Vol Dir", "Pr Dir"]
+            df.columns = ["Symbol", "RVOL", "Chg %", "Vol Dir", "Pr Dir"]
             st.dataframe(df, use_container_width=True, hide_index=True)
         else:
-            st.info("No spikes on this day.")
+            st.markdown(
+                '<div class="paper-info">No spikes on this day.</div>',
+                unsafe_allow_html=True,
+            )
     else:
-        st.info("No data. Click Sync to initialize.")
+        st.markdown(
+            '<div class="paper-info">No data. Click SYNC to initialize.</div>',
+            unsafe_allow_html=True,
+        )
     st.markdown('</div>', unsafe_allow_html=True)
 
-# ─── Footer ──────────────────────────────────────────────────────────────
-s = get_meta("last_scan_time") or "—"
-sy = get_meta("last_sync_date") or "—"
-st.markdown(f'<div class="footer-status">Scan: {s} &nbsp;·&nbsp; Sync: {sy}</div>', unsafe_allow_html=True)
+# ── Footer ───────────────────────────────────────────────────────────────
+st.markdown(f"""
+<div class="report-footer">
+    Generated {now.strftime("%Y-%m-%d %H:%M:%S")} PKT
+    &middot; Source: TradingView Scanner API, Yahoo Finance
+    &middot; Watchlist: {len(WATCHLIST)} symbols<br>
+    Spikes are identified when Relative Volume (based on 10-day average from TV or 20-day SMA from Yahoo)
+    meets or exceeds {RVOL_THRESHOLD}x. Quantitative screening tool only &mdash; not investment advice.
+</div>
+""", unsafe_allow_html=True)
