@@ -187,6 +187,10 @@ def scan_live_data():
     now = datetime.now(TZ)
     tv_data = fetch_tv_snapshot()
     if not tv_data:
+        st.warning(
+            "No live data returned from TradingView. Either the market is closed right "
+            "now, or the request was blocked/rate-limited — try again in a moment."
+        )
         return False
 
     today_str = now.strftime('%Y-%m-%d')
@@ -377,3 +381,66 @@ if market_open and not scan_clicked:
 
 last_scan_time = get_meta("last_scan_time")
 last_sync_time = get_meta("last_sync_date")
+st.markdown(
+    f'<p class="status-line">'
+    f'Last scan: {last_scan_time or "—"} &nbsp;·&nbsp; '
+    f'Last sync: {last_sync_time or "—"}'
+    f'</p>',
+    unsafe_allow_html=True
+)
+
+# ── Today Live ───────────────────────────────────────────────────────────
+st.markdown('<div class="section-title">Today — Live</div>', unsafe_allow_html=True)
+today_str = now.strftime('%Y-%m-%d')
+with sqlite3.connect(DB_NAME) as conn:
+    live_df = pd.read_sql("""
+        SELECT snap_time, symbol, rvol, price_change, volume_direction, price_direction,
+               vol_chg_1h, vol_chg_2h
+        FROM live_snapshots
+        WHERE snap_time LIKE ?
+        ORDER BY snap_time DESC
+    """, conn, params=(f"{today_str}%",))
+
+st.markdown('<div class="section-card">', unsafe_allow_html=True)
+if not live_df.empty:
+    latest_time = live_df['snap_time'].max()
+    live_df = live_df[live_df['snap_time'] == latest_time].drop(columns=['snap_time'])
+    live_df = live_df.sort_values('rvol', ascending=False)
+    t = latest_time.split(' ')[1]
+    st.caption(f"{len(live_df)} symbols &nbsp;·&nbsp; Snapshot at {t} PKT")
+    live_df.columns = [
+        "Symbol", "Rel. Vol.", "Chg %", "Vol. Dir.",
+        "Price Dir.", "Vol Δ 1H %", "Vol Δ 2H %"
+    ]
+    st.dataframe(live_df, use_container_width=True, hide_index=True)
+else:
+    st.info("No volume spikes detected yet today.")
+st.markdown('</div>', unsafe_allow_html=True)
+
+# ── Yesterday & Two Days Ago ────────────────────────────────────────────
+with sqlite3.connect(DB_NAME) as conn:
+    hist_dates = [row[0] for row in
+                  conn.execute("SELECT date FROM trading_dates ORDER BY idx ASC LIMIT 2").fetchall()]
+
+for i, title in enumerate(["Yesterday", "Two Days Ago"]):
+    st.markdown(f'<div class="section-title">{title}</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-card">', unsafe_allow_html=True)
+    if i < len(hist_dates):
+        target_date = hist_dates[i]
+        st.caption(target_date)
+
+        with sqlite3.connect(DB_NAME) as conn:
+            df = pd.read_sql("""
+                SELECT symbol, rvol, price_change, volume_direction, price_direction
+                FROM spikes WHERE date = ? ORDER BY rvol DESC
+            """, conn, params=(target_date,))
+
+        if not df.empty:
+            df.columns = ["Symbol", "Rel. Vol.", "Chg %", "Vol. Dir.", "Price Dir."]
+            st.dataframe(df, use_container_width=True, hide_index=True)
+        else:
+            st.info(f"No spikes on this day.")
+    else:
+        st.caption("No data")
+        st.info("Click Sync to initialize.")
+    st.markdown('</div>', unsafe_allow_html=True)
