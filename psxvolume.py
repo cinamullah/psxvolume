@@ -100,17 +100,17 @@ def is_market_open():
 # ── Historical sync ──────────────────────────────────────────────────────────
 def sync_historical_data(days=30):
     """Backfill daily_volume with real historical daily volume per symbol,
-    via Yahoo Finance (PSX tickers use the .KA suffix there). Returns
-    (num_symbols_synced, num_failed)."""
+    via Yahoo Finance (PSX tickers use the .KA suffix there). Missing/failed
+    tickers are silently skipped. Returns (num_synced, num_skipped)."""
     import yfinance as yf
 
     conn = get_db()
-    ok, failed = 0, 0
+    synced, skipped = 0, 0
     for symbol in KSE100:
         try:
             hist = yf.Ticker(f"{symbol}.KA").history(period=f"{days}d")
             if hist.empty:
-                failed += 1
+                skipped += 1
                 continue
             for idx, row in hist.iterrows():
                 date_str = idx.strftime("%Y-%m-%d")
@@ -122,12 +122,12 @@ def sync_historical_data(days=30):
                     "ON CONFLICT(date, symbol) DO UPDATE SET volume=excluded.volume",
                     (date_str, symbol, vol),
                 )
-            ok += 1
+            synced += 1
         except Exception:
-            failed += 1
+            skipped += 1
     conn.commit()
     conn.close()
-    return ok, failed
+    return synced, skipped
 
 
 # ── Data fetch ───────────────────────────────────────────────────────────────
@@ -276,20 +276,19 @@ if is_market_open() and (datetime.now().timestamp() - st.session_state.last_scan
         run_scan_cycle()
     st.session_state.last_scan = datetime.now().timestamp()
 
-st.title("📊 Volume Spikes")
-st.caption(f"KSE-100 · RVOL ≥ {RVOL_SPIKE_THRESHOLD}x · Top {TOP_N} by RVOL · "
-           f"Market {'open' if is_market_open() else 'closed'} (9:15 AM–3:30 PM PKT)")
+st.caption(f"📊 KSE-100 · RVOL ≥ {RVOL_SPIKE_THRESHOLD}x · Top {TOP_N} · "
+           f"Market {'🟢 open' if is_market_open() else '🔴 closed'} (9:15–3:30 PM PKT)")
 
 col1, col2 = st.columns(2)
-if col1.button("🔍 Scan"):
-    with st.spinner("Scanning live market data..."):
+if col1.button("🔍 Scan", use_container_width=True):
+    with st.spinner("Scanning..."):
         run_scan_cycle()
     st.session_state.last_scan = datetime.now().timestamp()
     st.rerun()
-if col2.button("⬇️ Sync"):
-    with st.spinner("Downloading historical data..."):
-        ok, failed = sync_historical_data()
-    st.success(f"Synced {ok} symbols" + (f", {failed} failed" if failed else ""))
+if col2.button("⬇️ Sync", use_container_width=True):
+    with st.spinner("Syncing history..."):
+        synced, skipped = sync_historical_data()
+    st.toast(f"Synced {synced} symbols" + (f", skipped {skipped}" if skipped else ""))
     st.rerun()
 
 conn = get_db()
@@ -304,14 +303,19 @@ yesterday_rows = get_top_spikes_for_date(conn, dates[1]) if len(dates) > 1 else 
 two_days_ago_rows = get_top_spikes_for_date(conn, dates[2]) if len(dates) > 2 else []
 conn.close()
 
-st.subheader("Today")
-if today_rows:
-    st.dataframe(pd.DataFrame([dict(r) for r in today_rows]), hide_index=True, use_container_width=True)
-else:
-    st.write("No spikes yet today.")
 
-st.subheader(f"Yesterday{' (' + dates[1] + ')' if len(dates) > 1 else ''}")
-st.dataframe(pd.DataFrame(yesterday_rows), hide_index=True, use_container_width=True) if yesterday_rows else st.write("No data yet.")
+def show(label, rows):
+    st.caption(label)
+    if rows:
+        df = rows if isinstance(rows, list) and isinstance(rows[0], dict) else [dict(r) for r in rows]
+        st.dataframe(pd.DataFrame(df), hide_index=True, use_container_width=True, height=min(38 * (len(df) + 1), 388))
+    else:
+        st.caption("—")
 
-st.subheader(f"Two Days Ago{' (' + dates[2] + ')' if len(dates) > 2 else ''}")
-st.dataframe(pd.DataFrame(two_days_ago_rows), hide_index=True, use_container_width=True) if two_days_ago_rows else st.write("No data yet.")
+
+if len(dates) < AVG_DAYS:
+    st.caption(f"ℹ️ Only {len(dates)} day(s) of history — click Sync to backfill {AVG_DAYS} days for RVOL to work.")
+
+show("Today", today_rows)
+show(f"Yesterday ({dates[1]})" if len(dates) > 1 else "Yesterday", yesterday_rows)
+show(f"Two Days Ago ({dates[2]})" if len(dates) > 2 else "Two Days Ago", two_days_ago_rows)
