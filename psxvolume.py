@@ -2,8 +2,21 @@ import streamlit as st
 import yfinance as yf
 import sqlite3
 import pandas as pd
+import os
 from datetime import datetime, time as dtime
 from zoneinfo import ZoneInfo
+
+# ── Self-contained dark theme setup ─────────────────────────────────────
+# Streamlit only reads theme settings from .streamlit/config.toml at process
+# startup, so we write it out here (next to this script) if it's missing.
+# This keeps everything in this one file — just run `streamlit run` and,
+# on the very first launch, restart once so the theme takes effect.
+_CONFIG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".streamlit")
+_CONFIG_PATH = os.path.join(_CONFIG_DIR, "config.toml")
+if not os.path.exists(_CONFIG_PATH):
+    os.makedirs(_CONFIG_DIR, exist_ok=True)
+    with open(_CONFIG_PATH, "w") as f:
+        f.write('[theme]\nbase = "dark"\n')
 
 # ── Configuration ────────────────────────────────────────────────────────
 DB_NAME = "volume_scanner.db"
@@ -277,39 +290,34 @@ init_db()
 st.markdown("""
 <style>
     :root {
-        --bg: #0e0f11;
-        --panel: #16181c;
-        --border: #2a2d33;
-        --text: #d8dadd;
-        --muted: #8a8f98;
-        --accent: #c9a34e;
+        --border: #333844;
+        --muted: #a3a8b4;
+        --accent: #ff4b4b;
     }
-    .stApp { background-color: var(--bg); }
     .block-container {
-        padding-top: 0.8rem;
-        padding-bottom: 1rem;
-        max-width: 1200px;
+        padding-top: 1.5rem;
+        padding-bottom: 1.5rem;
+        max-width: 1150px;
     }
     h1, h2, h3, h4 {
         font-family: Georgia, 'Times New Roman', serif;
-        color: var(--text) !important;
         letter-spacing: 0.2px;
     }
-    p, span, label, div { color: var(--text); }
     .report-header {
         border-bottom: 1px solid var(--border);
-        padding-bottom: 6px;
-        margin-bottom: 6px;
+        padding-bottom: 8px;
+        margin-bottom: 10px;
     }
     .report-header h1 {
-        font-size: 1.35rem;
-        margin: 0 0 2px 0;
+        font-size: 1.5rem;
+        margin: 0 0 4px 0;
     }
     .report-header .caption-line {
         font-family: Georgia, 'Times New Roman', serif;
-        font-size: 0.78rem;
+        font-size: 0.85rem;
         color: var(--muted);
         margin: 0;
+        line-height: 1.4;
     }
     .section-title {
         font-family: Georgia, 'Times New Roman', serif;
@@ -318,51 +326,37 @@ st.markdown("""
         color: var(--accent);
         text-transform: uppercase;
         letter-spacing: 0.6px;
-        margin: 10px 0 4px 0;
+        margin: 16px 0 6px 0;
         border-bottom: 1px solid var(--border);
-        padding-bottom: 3px;
+        padding-bottom: 4px;
     }
     .section-card {
-        background-color: var(--panel);
+        background-color: #1a1d24;
         border: 1px solid var(--border);
-        border-radius: 3px;
-        padding: 8px 10px;
+        border-radius: 4px;
+        padding: 10px 14px 6px 14px;
         margin-bottom: 6px;
     }
-    .section-card .stCaption, .section-card p {
-        font-size: 0.75rem !important;
-        color: var(--muted) !important;
-        margin: 0 0 4px 0 !important;
+    .section-card p[data-testid="stCaptionContainer"] {
+        font-size: 0.82rem !important;
+        margin-bottom: 6px !important;
     }
     .status-line {
         font-family: Georgia, 'Times New Roman', serif;
-        font-size: 0.72rem;
-        color: var(--muted);
-        margin: 2px 0 6px 0;
-    }
-    hr, div[data-testid="stDivider"] {
-        margin: 6px 0 !important;
-        border-color: var(--border) !important;
-    }
-    div[data-testid="stDataFrame"] {
-        font-family: Georgia, 'Times New Roman', serif;
         font-size: 0.8rem;
+        color: var(--muted);
+        margin: 4px 0 14px 0;
     }
-    div[data-testid="stVerticalBlock"] { gap: 0.35rem !important; }
+    div[data-testid="stVerticalBlock"] { gap: 0.5rem !important; }
+    div[data-testid="stElementToolbar"] { display: none; }
+    div[data-testid="stDataFrame"] { font-size: 0.85rem; }
     div[data-testid="stButton"] button {
-        background-color: var(--panel);
-        color: var(--text);
-        border: 1px solid var(--border);
-        font-size: 0.78rem;
-        padding: 0.25rem 0.6rem;
-    }
-    div[data-testid="stButton"] button:hover {
-        border-color: var(--accent);
-        color: var(--accent);
+        font-size: 0.85rem;
+        padding: 0.3rem 0.75rem;
     }
     div[data-testid="stAlert"] {
-        padding: 6px 10px;
-        font-size: 0.78rem;
+        padding: 8px 12px;
+        font-size: 0.85rem;
     }
 </style>
 """, unsafe_allow_html=True)
