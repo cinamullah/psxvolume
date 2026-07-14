@@ -25,7 +25,6 @@ TZ = ZoneInfo("Asia/Karachi")          # PSX timezone
 MARKET_OPEN = dtime(9, 15)
 MARKET_CLOSE = dtime(15, 30)
 RVOL_THRESHOLD = 1.5
-TOP_N_LIVE = 15
 SNAPSHOT_INTERVAL_MIN = 15
 TV_URL = "https://scanner.tradingview.com/pakistan/scan"
 
@@ -263,6 +262,9 @@ def scan_live_data():
             vol_chg_1h = pct_change_vs(now - timedelta(minutes=60))
             vol_chg_2h = pct_change_vs(now - timedelta(minutes=120))
 
+            if rvol < RVOL_THRESHOLD:
+                continue
+
             conn.execute("""
                 INSERT OR REPLACE INTO live_snapshots
                 (snap_time, symbol, cum_volume, price, rvol, price_change,
@@ -360,7 +362,7 @@ market_open = is_market_open(now)
 st.markdown(f"""
 <div class="report-header">
     <h1>PSX Volume Spike Report</h1>
-    <p class="caption-line">Live: Top {TOP_N_LIVE} by Relative Volume &nbsp;·&nbsp; Historical: RVOL ≥ {RVOL_THRESHOLD} &nbsp;·&nbsp; Karachi time: {now.strftime('%Y-%m-%d %H:%M:%S')} &nbsp;·&nbsp; 
+    <p class="caption-line">Relative Volume threshold ≥ {RVOL_THRESHOLD} &nbsp;·&nbsp; Karachi time: {now.strftime('%Y-%m-%d %H:%M:%S')} &nbsp;·&nbsp; 
     Market {'🟢 OPEN' if market_open else '🔴 CLOSED'} (session 9:15–15:30)</p>
 </div>
 """, unsafe_allow_html=True)
@@ -373,9 +375,9 @@ if market_open:
 # ── Buttons ──────────────────────────────────────────────────────────────
 col_a, col_b, col_c = st.columns([1, 1, 4])
 with col_a:
-    scan_clicked = st.button("Scan Live", use_container_width=True)
+    scan_clicked = st.button("Scan", use_container_width=True)
 with col_b:
-    sync_clicked = st.button("Sync Historical", use_container_width=True)
+    sync_clicked = st.button("Sync", use_container_width=True)
 
 if scan_clicked:
     with st.spinner("Scanning live market data..."):
@@ -392,6 +394,13 @@ if sync_clicked:
         if sync_historical_data():
             st.success("Historical data synced successfully!")
             st.rerun()
+
+# Auto-sync historical data once per day, without requiring a click.
+if not sync_clicked:
+    today_str = now.strftime('%Y-%m-%d')
+    if get_meta("last_sync_date") != today_str:
+        with st.spinner("Auto-syncing historical data (once per day)..."):
+            sync_historical_data()
 
 # Auto-scan once every 15 minutes during market hours, without requiring a click.
 if market_open and not scan_clicked:
@@ -432,14 +441,14 @@ st.markdown('<div class="section-card">', unsafe_allow_html=True)
 if not live_df.empty:
     latest_time = live_df['snap_time'].max()
     live_df = live_df[live_df['snap_time'] == latest_time].drop(columns=['snap_time'])
-    live_df = live_df.sort_values('rvol', ascending=False).head(TOP_N_LIVE)
-    st.caption(f"Top {len(live_df)} by Relative Volume · as of {latest_time} (PKT) · "
+    live_df = live_df.sort_values('rvol', ascending=False)
+    st.caption(f"{len(live_df)} symbol(s) crossing RVOL ≥ {RVOL_THRESHOLD} · as of {latest_time} (PKT) · "
                f"refreshes every {SNAPSHOT_INTERVAL_MIN} min while market is open")
     live_df.columns = ["Symbol", "Relative Volume", "Price Change %", "Volume Direction",
                         "Price Direction", "Vol Δ vs 1H Ago %", "Vol Δ vs 2H Ago %"]
     st.dataframe(live_df, use_container_width=True, hide_index=True)
 else:
-    st.info("No live data yet today. Click 'Scan Live Data' during market hours (9:15–15:30 PKT).")
+    st.info(f"No spikes crossing RVOL ≥ {RVOL_THRESHOLD} yet today. Click 'Scan' during market hours (9:15–15:30 PKT).")
 st.markdown('</div>', unsafe_allow_html=True)
 
 # ── Sections 2 & 3: Yesterday / Two Days Ago (Historical, stacked) ──────
@@ -470,5 +479,5 @@ for i in range(2):
             st.info(f"No spikes crossed RVOL ≥ {RVOL_THRESHOLD} on this day.")
     else:
         st.caption("Date: Unknown")
-        st.info("Click 'Sync Historical Data' above to initialize this table.")
+        st.info("Click 'Sync' above to initialize this table.")
     st.markdown('</div>', unsafe_allow_html=True)
