@@ -6,7 +6,6 @@ from datetime import datetime
 
 # ── Configuration ────────────────────────────────────────────────────────
 DB_NAME = "volume_scanner.db"
-# Note: yfinance requires .KA suffix for Karachi Stock Exchange symbols
 WATCHLIST = [
     "ABL.KA", "ABOT.KA", "AGP.KA", "AICL.KA", "AIRLINK.KA", "AKBL.KA", "ATLH.KA", 
     "ATRL.KA", "BAFL.KA", "BAHL.KA", "BOP.KA", "BPL.KA", "BWCL.KA", "CHCC.KA", 
@@ -33,8 +32,8 @@ def init_db():
         """)
 
 def sync_data():
-    """Fetch data, calculate metrics, and save to SQLite."""
-    # Download 1 month to ensure 20-day SMA is accurate
+    """Fetch historical data, calculate metrics, and save to SQLite."""
+    # Fetch 1 month to ensure 20-day SMA calculation is accurate
     raw_data = yf.download(WATCHLIST, period="1mo", group_by='ticker', threads=True)
     
     with sqlite3.connect(DB_NAME) as conn:
@@ -47,10 +46,9 @@ def sync_data():
             rvol = df['Volume'] / sma_vol
             pct_change = df['Close'].pct_change() * 100
             
-            # Prepare data
             clean_symbol = symbol.replace('.KA', '')
             
-            # Loop through last 5 days to find any spikes
+            # Iterate through the last 5 days to ensure we capture history
             for date, val in rvol.tail(5).items():
                 if val >= 1.5:
                     conn.execute("""
@@ -60,41 +58,43 @@ def sync_data():
         conn.commit()
 
 # ── Dashboard UI ─────────────────────────────────────────────────────────
-st.set_page_config(layout="wide", page_title="Volume Spike Dashboard")
+st.set_page_config(layout="wide", page_title="Volume Spike History")
 init_db()
 
-st.title("📈 Volume Spike Dashboard (RVOL ≥ 1.5)")
+st.title("📈 Historical Volume Spike Dashboard (RVOL ≥ 1.5)")
 
-if st.button("🔄 Sync Market Data"):
-    with st.spinner("Calculating Spikes..."):
+if st.button("🔄 Sync Historical Data"):
+    with st.spinner("Processing..."):
         sync_data()
-        st.success("Data synced!")
+        st.success("Historical data synced!")
         st.rerun()
 
-# Get the last 3 dates available in the database
+# ── Query & Display ──────────────────────────────────────────────────────
 with sqlite3.connect(DB_NAME) as conn:
+    # Fetch the 3 most recent trading dates stored in the database
     dates = [row[0] for row in conn.execute("SELECT DISTINCT date FROM spikes ORDER BY date DESC LIMIT 3").fetchall()]
 
-# Create 3 columns
 cols = st.columns(3)
-
-# Mapping indexes for readability
-titles = ["Today", "Yesterday", "Two Days Ago"]
+titles = ["Today (Latest)", "Yesterday", "Two Days Ago"]
 
 for i, col in enumerate(cols):
-    if i < len(dates):
-        current_date = dates[i]
-        with col:
-            st.subheader(f"{titles[i]} ({current_date})")
+    with col:
+        if i < len(dates):
+            target_date = dates[i]
+            st.subheader(f"{titles[i]}")
+            st.caption(f"Date: {target_date}")
             
             # Query for this specific date
             df = pd.read_sql(
                 "SELECT symbol, rvol, price_change FROM spikes WHERE date = ? ORDER BY rvol DESC",
-                conn, params=(current_date,)
+                conn, params=(target_date,)
             )
             
             if not df.empty:
                 df.columns = ["Symbol", "Relative Volume", "Price Change %"]
                 st.dataframe(df, use_container_width=True, hide_index=True)
             else:
-                st.write("No spikes found.")
+                st.info("No spikes for this day.")
+        else:
+            st.subheader(titles[i])
+            st.info("No data available.")
