@@ -266,7 +266,7 @@ def run_scan_cycle():
 
 
 # ── UI ───────────────────────────────────────────────────────────────────────
-st.set_page_config(page_title="PSX Volume Spikes", layout="wide")
+st.set_page_config(page_title="PSX Volume Spikes", layout="centered")
 init_db()
 
 if "last_scan" not in st.session_state:
@@ -280,42 +280,64 @@ st.caption(f"📊 KSE-100 · RVOL ≥ {RVOL_SPIKE_THRESHOLD}x · Top {TOP_N} · 
            f"Market {'🟢 open' if is_market_open() else '🔴 closed'} (9:15–3:30 PM PKT)")
 
 col1, col2 = st.columns(2)
-if col1.button("🔍 Scan", use_container_width=True):
+if col1.button("🔍 Scan", width="stretch"):
     with st.spinner("Scanning..."):
         run_scan_cycle()
     st.session_state.last_scan = datetime.now().timestamp()
     st.rerun()
-if col2.button("⬇️ Sync", use_container_width=True):
+if col2.button("⬇️ Sync", width="stretch"):
     with st.spinner("Syncing history..."):
         synced, skipped = sync_historical_data()
     st.toast(f"Synced {synced} symbols" + (f", skipped {skipped}" if skipped else ""))
     st.rerun()
 
 conn = get_db()
+_today_str = datetime.now().strftime("%Y-%m-%d")
 today_rows = conn.execute(
     "SELECT symbol AS Symbol, price AS Price, rvol AS RVOL, day_volume AS [Day Volume], "
     "avg_volume_20d AS [20d Avg Vol], trend AS Trend, signal AS Signal FROM spike_state "
-    "WHERE is_candidate=1 AND rvol IS NOT NULL ORDER BY rvol DESC LIMIT ?",
-    (TOP_N,),
+    "WHERE is_candidate=1 AND rvol IS NOT NULL AND updated_at LIKE ? "
+    "ORDER BY rvol DESC LIMIT ?",
+    (f"{_today_str}%", TOP_N),
 ).fetchall()
 dates = get_trading_dates(conn, limit=3)
 yesterday_rows = get_top_spikes_for_date(conn, dates[1]) if len(dates) > 1 else []
 two_days_ago_rows = get_top_spikes_for_date(conn, dates[2]) if len(dates) > 2 else []
 conn.close()
 
-
-def show(label, rows):
-    st.caption(label)
-    if rows:
-        df = rows if isinstance(rows, list) and isinstance(rows[0], dict) else [dict(r) for r in rows]
-        st.dataframe(pd.DataFrame(df), hide_index=True, use_container_width=True, height=min(38 * (len(df) + 1), 388))
-    else:
-        st.caption("—")
-
-
 if len(dates) < AVG_DAYS:
     st.caption(f"ℹ️ Only {len(dates)} day(s) of history — click Sync to backfill {AVG_DAYS} days for RVOL to work.")
 
-show("Today", today_rows)
-show(f"Yesterday ({dates[1]})" if len(dates) > 1 else "Yesterday", yesterday_rows)
-show(f"Two Days Ago ({dates[2]})" if len(dates) > 2 else "Two Days Ago", two_days_ago_rows)
+_COL_CFG = {
+    "RVOL": st.column_config.NumberColumn("RVOL", format="%.2fx", width="small"),
+    "Price": st.column_config.NumberColumn("Price", format="%.2f", width="small"),
+    "Day Volume": st.column_config.NumberColumn("Volume", format="compact", width="small"),
+    "20d Avg Vol": st.column_config.NumberColumn("20d Avg", format="compact", width="small"),
+    "Trend": st.column_config.TextColumn("Trend", width="small"),
+    "Signal": st.column_config.TextColumn("Signal", width="small"),
+    "Symbol": st.column_config.TextColumn("Symbol", width="small"),
+}
+
+
+def show(rows):
+    if not rows:
+        st.caption("—")
+        return
+    df = rows if isinstance(rows, list) and isinstance(rows[0], dict) else [dict(r) for r in rows]
+    st.dataframe(
+        pd.DataFrame(df), hide_index=True, width="stretch",
+        row_height=28, height=28 * len(df) + 38, column_config=_COL_CFG,
+    )
+
+
+tab1, tab2, tab3 = st.tabs([
+    "Today",
+    f"Yesterday ({dates[1]})" if len(dates) > 1 else "Yesterday",
+    f"2 Days Ago ({dates[2]})" if len(dates) > 2 else "2 Days Ago",
+])
+with tab1:
+    show(today_rows)
+with tab2:
+    show(yesterday_rows)
+with tab3:
+    show(two_days_ago_rows)
