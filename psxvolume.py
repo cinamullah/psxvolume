@@ -293,6 +293,10 @@ if col2.button("⬇️ Sync", width="stretch"):
 
 conn = get_db()
 _today_str = datetime.now().strftime("%Y-%m-%d")
+
+# "Today" prefers live spike_state (has price/trend/signal from actual scans),
+# but falls back to daily_volume-derived spikes for today's date if a Sync
+# has run today but no live Scan has happened yet (e.g. before market open).
 today_rows = conn.execute(
     "SELECT symbol AS Symbol, price AS Price, rvol AS RVOL, day_volume AS [Day Volume], "
     "avg_volume_20d AS [20d Avg Vol], trend AS Trend, signal AS Signal FROM spike_state "
@@ -300,13 +304,24 @@ today_rows = conn.execute(
     "ORDER BY rvol DESC LIMIT ?",
     (f"{_today_str}%", TOP_N),
 ).fetchall()
-dates = get_trading_dates(conn, limit=3)
-yesterday_rows = get_top_spikes_for_date(conn, dates[1]) if len(dates) > 1 else []
-two_days_ago_rows = get_top_spikes_for_date(conn, dates[2]) if len(dates) > 2 else []
+today_rows = [dict(r) for r in today_rows] or get_top_spikes_for_date(conn, _today_str)
+
+# "Yesterday" / "2 days ago" are anchored to the real calendar date, not to
+# whatever happens to be the most recent row in daily_volume — otherwise a
+# Sync without a same-day Scan silently mislabels which day is which.
+all_dates = get_trading_dates(conn, limit=40)  # generous window to search back through
+past_dates = [d for d in all_dates if d != _today_str]
+yesterday_date = past_dates[0] if len(past_dates) > 0 else None
+two_days_ago_date = past_dates[1] if len(past_dates) > 1 else None
+
+yesterday_rows = get_top_spikes_for_date(conn, yesterday_date) if yesterday_date else []
+two_days_ago_rows = get_top_spikes_for_date(conn, two_days_ago_date) if two_days_ago_date else []
+
+_history_days = len(all_dates)
 conn.close()
 
-if len(dates) < AVG_DAYS:
-    st.caption(f"ℹ️ Only {len(dates)} day(s) of history — click Sync to backfill {AVG_DAYS} days for RVOL to work.")
+if _history_days < AVG_DAYS:
+    st.caption(f"ℹ️ Only {_history_days} day(s) of history — click Sync to backfill {AVG_DAYS} days for RVOL to work.")
 
 _COL_CFG = {
     "RVOL": st.column_config.NumberColumn("RVOL", format="%.2fx", width="small"),
@@ -319,7 +334,8 @@ _COL_CFG = {
 }
 
 
-def show(rows):
+def show(label, rows):
+    st.caption(label)
     if not rows:
         st.caption("—")
         return
@@ -330,14 +346,6 @@ def show(rows):
     )
 
 
-tab1, tab2, tab3 = st.tabs([
-    "Today",
-    f"Yesterday ({dates[1]})" if len(dates) > 1 else "Yesterday",
-    f"2 Days Ago ({dates[2]})" if len(dates) > 2 else "2 Days Ago",
-])
-with tab1:
-    show(today_rows)
-with tab2:
-    show(yesterday_rows)
-with tab3:
-    show(two_days_ago_rows)
+show(f"Today ({_today_str})", today_rows)
+show(f"Yesterday ({yesterday_date})" if yesterday_date else "Yesterday", yesterday_rows)
+show(f"2 Days Ago ({two_days_ago_date})" if two_days_ago_date else "2 Days Ago", two_days_ago_rows)
