@@ -215,6 +215,11 @@ def scan_live_data():
     now = datetime.now(TZ)
     avg_vol_map, prev_close_map = get_reference_data()
     if not avg_vol_map:
+        st.warning(
+            "Couldn't build reference volumes/prices, so live RVOL can't be computed. "
+            "This usually means historical data hasn't been synced yet — click "
+            "'Sync Historical Data' first, then try 'Scan Live' again."
+        )
         return False
 
     try:
@@ -226,7 +231,12 @@ def scan_live_data():
 
     sample_ticker = WATCHLIST[0]
     if sample_ticker not in intraday or intraday[sample_ticker].empty:
-        st.warning("No intraday data available yet (market may be closed).")
+        st.warning(
+            "No 15-minute intraday data returned for the watchlist. Either the market is "
+            "closed right now, or Yahoo Finance doesn't have intraday coverage for these "
+            "PSX (.KA) tickers at this moment — daily data can still work fine even when "
+            "intraday doesn't."
+        )
         return False
 
     fraction = trading_fraction_elapsed(now)
