@@ -1,47 +1,22 @@
-import time
 import sqlite3
+import logging
+from typing import List, Optional, Dict, Any
+from contextlib import contextmanager
+from datetime import datetime
+
 import requests
 import pandas as pd
+import yfinance as yf
 import streamlit as st
-from datetime import datetime
-from bs4 import BeautifulSoup
 from zoneinfo import ZoneInfo
-from contextlib import contextmanager
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 # ── Setup ──────────────────────────────────────────────────────────────────
 DB_PATH = "volume_spikes.db"
 PKT = ZoneInfo("Asia/Karachi")
-LIVE_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-    "X-Requested-With": "XMLHttpRequest",
-    "Referer": "https://dps.psx.com.pk/",
-}
-HISTORICAL_HEADERS = {
-    "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-    "X-Requested-With": "XMLHttpRequest",
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Referer": "https://dps.psx.com.pk/historical",
-}
 
-# Shared session with automatic retry/backoff — PSX (or its CDN) will drop
-# connections outright (RemoteDisconnected) if hit too fast/too often, so we
-# retry transient failures with increasing delay instead of giving up immediately.
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
-
-SESSION = requests.Session()
-_retry = Retry(
-    total=4,
-    connect=4,
-    read=4,
-    backoff_factor=2,  # 2s, 4s, 8s, 16s between retries
-    status_forcelist=[429, 500, 502, 503, 504],
-    allowed_methods=frozenset(["GET", "POST"]),
-)
-SESSION.mount("https://", HTTPAdapter(max_retries=_retry))
-SESSION.mount("http://", HTTPAdapter(max_retries=_retry))
-
-# KSE-100 constituent symbols tracked for historical sync
+# KSE-100 constituent symbols tracked
 WATCHLIST = [
     "ABL", "ABOT", "AGP", "AICL", "AIRLINK", "AKBL", "ATLH", "ATRL",
     "BAFL", "BAHL", "BOP", "BPL", "BWCL", "CHCC", "CNERGY", "COLG",
@@ -57,9 +32,113 @@ WATCHLIST = [
 ]
 
 
+# ── Data sources ─────────────────────────────────────────────────────────
+class TVScreener:
+    """Queries TradingView's public Scanner API — returns all requested
+    symbols in a single request (much faster than per-symbol scraping)."""
+
+    DEFAULT_URL = "https://scanner.tradingview.com/pakistan/scan"
+    DEFAULT_COLS = ["name", "close", "change", "volume"]
+
+    def __init__(self, api_url: str = DEFAULT_URL):
+        self.api_url = api_url
+        self.session = requests.Session()
+        self.session.headers.update({
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                          "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Content-Type": "application/json",
+        })
+
+    def fetch_data(self, symbols: Optional[List[str]] = None,
+                    columns: Optional[List[str]] = None) -> pd.DataFrame:
+        cols = columns if columns is not None else self.DEFAULT_COLS
+        payload: Dict[str, Any] = {
+            "filter": [],
+            "options": {"active_symbols_only": True},
+            "symbols": {"query": {"types": []}, "tickers": []},
+            "columns": cols,
+            "sort": {"sortBy": "name", "sortOrder": "asc"},
+            "range": [0, 500],
+        }
+        if symbols:
+            payload["symbols"]["tickers"] = [f"PSX:{sym.upper()}" for sym in symbols]
+        else:
+            payload["filter"].append({"left": "type", "operation": "equal", "right": "stock"})
+
+        response = self.session.post(self.api_url, json=payload, timeout=15)
+        response.raise_for_status()
+        data = response.json()
+        raw_rows = data.get("data", [])
+        if not raw_rows:
+            return pd.DataFrame()
+
+        parsed = []
+        for item in raw_rows:
+            ticker = item.get("s", "").split(":")[-1]
+            row = {"symbol": ticker}
+            for col_name, val in zip(cols, item.get("d", [])):
+                row[col_name] = val
+            parsed.append(row)
+        return pd.DataFrame(parsed)
+
+
+class YFinanceClient:
+    """Batched historical OHLCV download via yfinance, formatted for PSX (.KA)."""
+
+    def __init__(self, suffix: str = ".KA"):
+        self.suffix = suffix
+
+    def _format_tickers(self, symbols: List[str]) -> List[str]:
+        out = []
+        for sym in symbols:
+            s = sym.strip().upper()
+            out.append(s if s.endswith(self.suffix) else f"{s}{self.suffix}")
+        return out
+
+    def fetch_history(self, symbols, period="3mo", interval="1d") -> pd.DataFrame:
+        ticker_list = [symbols] if isinstance(symbols, str) else list(symbols)
+        formatted = self._format_tickers(ticker_list)
+
+        df_raw = yf.download(
+            tickers=formatted, period=period, interval=interval,
+            auto_adjust=True, progress=False, threads=True,
+        )
+        if df_raw.empty:
+            return pd.DataFrame()
+        return self._flatten(df_raw, ticker_list)
+
+    def _flatten(self, df: pd.DataFrame, original_symbols: List[str]) -> pd.DataFrame:
+        if len(original_symbols) == 1:
+            clean = original_symbols[0].upper()
+            out = df.reset_index()
+            out.columns = [c.lower() for c in out.columns]
+            out.insert(1, "symbol", clean)
+            return out
+
+        if isinstance(df.columns, pd.MultiIndex):
+            dfs = []
+            for raw_ticker in df.columns.levels[1]:
+                if raw_ticker not in df.columns.get_level_values(1):
+                    continue
+                t_df = df.xs(raw_ticker, axis=1, level=1).dropna()
+                if t_df.empty:
+                    continue
+                t_df = t_df.reset_index()
+                t_df.columns = [c.lower() for c in t_df.columns]
+                t_df.insert(1, "symbol", raw_ticker.replace(self.suffix, ""))
+                dfs.append(t_df)
+            return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
+
+        return df.reset_index()
+
+
+TV = TVScreener()
+YF_CLIENT = YFinanceClient(suffix=".KA")
+
+
+# ── DB ───────────────────────────────────────────────────────────────────
 @contextmanager
 def get_db():
-    """Context-managed connection so every caller closes it automatically."""
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     try:
@@ -76,211 +155,91 @@ def init_db():
                 PRIMARY KEY (date, symbol)
             );
             CREATE TABLE IF NOT EXISTS spike_state (
-                symbol TEXT PRIMARY KEY, price REAL, volume REAL, updated_at TEXT
+                symbol TEXT PRIMARY KEY, price REAL, change REAL, volume REAL, updated_at TEXT
             );
         """)
         conn.commit()
 
 
-# ── Scrapers ───────────────────────────────────────────────────────────────
-def get_live_data(debug: bool = False):
-    """Scrapes live market-watch data from PSX (SYMBOL ... CURRENT ... VOLUME)."""
-    url = "https://dps.psx.com.pk/market-watch"
+# ── Fetchers (thin wrappers around the clients, with Streamlit error UX) ──
+def get_live_data(debug: bool = False) -> pd.DataFrame:
     try:
-        resp = SESSION.get(url, headers=LIVE_HEADERS, timeout=15)
+        df = TV.fetch_data(symbols=WATCHLIST)
     except requests.RequestException as e:
-        st.error(f"Live Scrape Failed — request error: {e}")
-        return {}
+        st.error(f"TradingView request failed: {e}")
+        return pd.DataFrame()
 
     if debug:
-        st.write(f"HTTP status: {resp.status_code} | response length: {len(resp.text)} chars")
-
-    if resp.status_code != 200:
-        st.error(f"Live Scrape Failed — PSX returned HTTP {resp.status_code} (not 200).")
-        if debug:
-            st.code(resp.text[:1500])
-        return {}
-
-    lowered = resp.text.lower()
-    if "enable javascript" in lowered or "captcha" in lowered or "cf-chl" in lowered:
-        st.error(
-            "Live Scrape Failed — the response looks like a JS-challenge/anti-bot page, "
-            "not the real market data. `requests` can't execute JavaScript, so if PSX is "
-            "serving this table client-side (or behind Cloudflare's bot check) this scraping "
-            "approach won't work — we'd need a headless browser (Playwright/Selenium) or the "
-            "underlying JSON API instead."
-        )
-        if debug:
-            st.code(resp.text[:1500])
-        return {}
-
-    soup = BeautifulSoup(resp.text, "html.parser")
-    rows = soup.select("tbody.tbl__body tr")
-
-    if not rows:
-        # Selector didn't match — try to find ANY table as a fallback so we can
-        # at least tell the user what structure the page actually has.
-        any_tables = soup.find_all("table")
-        st.error(
-            f"Live Scrape Failed — selector 'tbody.tbl__body tr' matched 0 rows. "
-            f"Found {len(any_tables)} <table> tag(s) on the page overall."
-        )
-        if debug:
-            st.write("First 2000 chars of HTML body for inspection:")
-            st.code(resp.text[:2000])
-        return {}
-
-    data = {}
-    skipped = 0
-    for row in rows:
-        cells = row.find_all("td")
-        if len(cells) < 11:
-            skipped += 1
-            continue
-        try:
-            sym = cells[0].text.strip()
-            price = float(cells[7].text.strip().replace(",", "") or 0)
-            vol = float(cells[10].text.strip().replace(",", "") or 0)
-            if sym:
-                data[sym] = {"volume": vol, "price": price}
-        except (ValueError, IndexError):
-            skipped += 1
-            continue
-
-    if debug:
-        st.write(f"Parsed {len(data)} symbols, skipped {skipped} malformed rows out of {len(rows)} total.")
-
-    if not data:
-        st.error(
-            "Live Scrape Failed — rows were found but none parsed into valid symbol/price/volume "
-            "data. The column layout may not match cells[0]=symbol, cells[7]=price, cells[10]=volume "
-            "anymore. Turn on debug mode and check the raw row HTML."
-        )
-
-    return data
+        st.caption(f"TradingView returned {len(df)} rows")
+    if df.empty:
+        st.error("TradingView returned no data for the watchlist.")
+    return df
 
 
-def _fetch_symbol_history(symbol: str):
-    """
-    Single POST with just {'symbol': symbol} returns the FULL historical
-    table for that symbol (id='historicalTable'). No date parameter needed.
-    Returns a list of (date_str, volume) tuples.
-    """
-    url = "https://dps.psx.com.pk/historical"
-    resp = SESSION.post(url, data={"symbol": symbol}, headers=HISTORICAL_HEADERS, timeout=15)
-    resp.raise_for_status()
+def sync_history(period: str = "3mo") -> None:
+    try:
+        df = YF_CLIENT.fetch_history(WATCHLIST, period=period, interval="1d")
+    except Exception as e:
+        st.error(f"yfinance request failed: {e}")
+        return
 
-    soup = BeautifulSoup(resp.text, "html.parser")
-    table = soup.find("table", id="historicalTable")
-    if not table or not table.find("tbody"):
-        return []
+    if df.empty:
+        st.warning("yfinance returned no historical data.")
+        return
 
-    # Map header labels to column indices instead of hardcoding positions,
-    # so this survives PSX reordering columns.
-    thead = table.find("thead")
-    headers_row = [th.text.strip().upper() for th in thead.find_all("th")] if thead else []
-
-    def find_col(*keywords):
-        for i, h in enumerate(headers_row):
-            if any(k in h for k in keywords):
-                return i
-        return None
-
-    date_idx = find_col("DATE", "TIME")
-    vol_idx = find_col("VOLUME")
-
-    out = []
-    for row in table.find("tbody").find_all("tr"):
-        cols = row.find_all("td")
-        if not cols:
-            continue
-        # Prefer data-value attribute (raw, unformatted) over display text
-        values = [c.get("data-value", c.text.strip()) for c in cols]
-
-        try:
-            raw_date = values[date_idx] if date_idx is not None else values[0]
-            raw_vol = values[vol_idx] if vol_idx is not None else values[-1]
-            date_str = pd.to_datetime(raw_date).strftime("%Y-%m-%d")
-            volume = float(str(raw_vol).replace(",", ""))
-            out.append((date_str, volume))
-        except (ValueError, IndexError, TypeError):
-            continue
-
-    return out
-
-
-def sync_history(symbols=None, progress_cb=None):
-    """Backfills daily_volume for the given symbols from their full history."""
-    symbols = symbols or WATCHLIST
-    results, errors = 0, []
-
+    rows = 0
     with get_db() as conn:
-        for i, sym in enumerate(symbols):
-            try:
-                rows = _fetch_symbol_history(sym)
-                for date_str, volume in rows:
-                    conn.execute(
-                        "INSERT OR REPLACE INTO daily_volume (date, symbol, volume) "
-                        "VALUES (?, ?, ?)",
-                        (date_str, sym, volume),
-                    )
-                    results += 1
-            except requests.RequestException as e:
-                errors.append(f"{sym}: {e}")
-            finally:
-                if progress_cb:
-                    progress_cb((i + 1) / len(symbols), sym)
-                time.sleep(1.5)  # slow and steady — PSX drops connections if hit too fast
+        for _, r in df.iterrows():
+            if pd.isna(r.get("volume")):
+                continue
+            date_str = pd.to_datetime(r["date"]).strftime("%Y-%m-%d")
+            conn.execute(
+                "INSERT OR REPLACE INTO daily_volume (date, symbol, volume) VALUES (?, ?, ?)",
+                (date_str, r["symbol"], float(r["volume"])),
+            )
+            rows += 1
         conn.commit()
-
-    if errors:
-        st.warning(f"Synced {results} rows, {len(errors)} symbols failed: {'; '.join(errors)}")
-    else:
-        st.success(f"Synced {results} rows across {len(symbols)} symbols.")
+    st.success(f"Synced {rows} rows across {df['symbol'].nunique()} symbols.")
 
 
 # ── App Logic ──────────────────────────────────────────────────────────────
 st.set_page_config(layout="centered", page_title="PSX Volume Scanner")
 init_db()
 
-st.markdown(
-    "<h4 style='margin-bottom:0.2rem'>📈 PSX Volume Scanner</h4>",
-    unsafe_allow_html=True,
-)
+st.markdown("<h4 style='margin-bottom:0.2rem'>📈 PSX Volume Scanner</h4>", unsafe_allow_html=True)
 
-col1, col2, col3 = st.columns([1, 1, 1])
+col1, col2, col3, col4 = st.columns([1, 1, 1, 1])
 scan_clicked = col1.button("🔄 Scan", use_container_width=True)
 sync_clicked = col2.button("⬇️ History", use_container_width=True)
-debug_mode = col3.checkbox("Debug", value=False)
+period = col3.selectbox("Period", ["1mo", "3mo", "6mo", "1y"], index=1, label_visibility="collapsed")
+debug_mode = col4.checkbox("Debug", value=False)
 
 if scan_clicked:
     with st.spinner("Fetching..."):
-        live = get_live_data(debug=debug_mode)
-        if debug_mode:
-            st.caption(f"{len(live)} symbols parsed")
-        today = datetime.now(PKT).strftime("%Y-%m-%d")
-        now_iso = datetime.now(PKT).isoformat()
-        with get_db() as conn:
-            for sym, d in live.items():
-                conn.execute(
-                    "INSERT OR REPLACE INTO spike_state (symbol, price, volume, updated_at) "
-                    "VALUES (?, ?, ?, ?)",
-                    (sym, d["price"], d["volume"], now_iso),
-                )
-                conn.execute(
-                    "INSERT OR REPLACE INTO daily_volume (date, symbol, volume) VALUES (?, ?, ?)",
-                    (today, sym, d["volume"]),
-                )
-            conn.commit()
-    if not debug_mode:
-        st.rerun()
+        live_df = get_live_data(debug=debug_mode)
+        if not live_df.empty:
+            today = datetime.now(PKT).strftime("%Y-%m-%d")
+            now_iso = datetime.now(PKT).isoformat()
+            with get_db() as conn:
+                for _, r in live_df.iterrows():
+                    conn.execute(
+                        "INSERT OR REPLACE INTO spike_state (symbol, price, change, volume, updated_at) "
+                        "VALUES (?, ?, ?, ?, ?)",
+                        (r["symbol"], r.get("close"), r.get("change"), r.get("volume"), now_iso),
+                    )
+                    conn.execute(
+                        "INSERT OR REPLACE INTO daily_volume (date, symbol, volume) VALUES (?, ?, ?)",
+                        (today, r["symbol"], r.get("volume")),
+                    )
+                conn.commit()
+            st.dataframe(
+                live_df.sort_values("volume", ascending=False),
+                use_container_width=True, hide_index=True, height=280,
+            )
 
 if sync_clicked:
-    progress = st.progress(0.0, text="Starting…")
-    sync_history(progress_cb=lambda frac, sym: progress.progress(frac, text=f"Syncing {sym}…"))
-    progress.empty()
-    if not debug_mode:
-        st.rerun()
+    with st.spinner(f"Syncing {period} of history for {len(WATCHLIST)} symbols..."):
+        sync_history(period=period)
 
 # ── Display ────────────────────────────────────────────────────────────────
 with get_db() as conn:
