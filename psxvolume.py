@@ -44,32 +44,81 @@ def init_db():
 
 
 # ── Scrapers ───────────────────────────────────────────────────────────────
-def get_live_data():
+def get_live_data(debug: bool = False):
     """Scrapes live market-watch data from PSX (SYMBOL ... CURRENT ... VOLUME)."""
+    url = "https://dps.psx.com.pk/market-watch"
     try:
-        url = "https://dps.psx.com.pk/market-watch"
         resp = requests.get(url, headers=HEADERS, timeout=15)
-        resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, "html.parser")
-        rows = soup.select("tbody.tbl__body tr")
-        data = {}
-        for row in rows:
-            cells = row.find_all("td")
-            if len(cells) < 11:
-                continue
-            try:
-                sym = cells[0].text.strip()
-                price = float(cells[7].text.strip().replace(",", "") or 0)
-                vol = float(cells[10].text.strip().replace(",", "") or 0)
-                if sym:
-                    data[sym] = {"volume": vol, "price": price}
-            except (ValueError, IndexError):
-                # Skip malformed rows instead of aborting the whole scrape
-                continue
-        return data
     except requests.RequestException as e:
-        st.error(f"Live Scrape Failed: {e}")
+        st.error(f"Live Scrape Failed — request error: {e}")
         return {}
+
+    if debug:
+        st.write(f"HTTP status: {resp.status_code} | response length: {len(resp.text)} chars")
+
+    if resp.status_code != 200:
+        st.error(f"Live Scrape Failed — PSX returned HTTP {resp.status_code} (not 200).")
+        if debug:
+            st.code(resp.text[:1500])
+        return {}
+
+    lowered = resp.text.lower()
+    if "enable javascript" in lowered or "captcha" in lowered or "cf-chl" in lowered:
+        st.error(
+            "Live Scrape Failed — the response looks like a JS-challenge/anti-bot page, "
+            "not the real market data. `requests` can't execute JavaScript, so if PSX is "
+            "serving this table client-side (or behind Cloudflare's bot check) this scraping "
+            "approach won't work — we'd need a headless browser (Playwright/Selenium) or the "
+            "underlying JSON API instead."
+        )
+        if debug:
+            st.code(resp.text[:1500])
+        return {}
+
+    soup = BeautifulSoup(resp.text, "html.parser")
+    rows = soup.select("tbody.tbl__body tr")
+
+    if not rows:
+        # Selector didn't match — try to find ANY table as a fallback so we can
+        # at least tell the user what structure the page actually has.
+        any_tables = soup.find_all("table")
+        st.error(
+            f"Live Scrape Failed — selector 'tbody.tbl__body tr' matched 0 rows. "
+            f"Found {len(any_tables)} <table> tag(s) on the page overall."
+        )
+        if debug:
+            st.write("First 2000 chars of HTML body for inspection:")
+            st.code(resp.text[:2000])
+        return {}
+
+    data = {}
+    skipped = 0
+    for row in rows:
+        cells = row.find_all("td")
+        if len(cells) < 11:
+            skipped += 1
+            continue
+        try:
+            sym = cells[0].text.strip()
+            price = float(cells[7].text.strip().replace(",", "") or 0)
+            vol = float(cells[10].text.strip().replace(",", "") or 0)
+            if sym:
+                data[sym] = {"volume": vol, "price": price}
+        except (ValueError, IndexError):
+            skipped += 1
+            continue
+
+    if debug:
+        st.write(f"Parsed {len(data)} symbols, skipped {skipped} malformed rows out of {len(rows)} total.")
+
+    if not data:
+        st.error(
+            "Live Scrape Failed — rows were found but none parsed into valid symbol/price/volume "
+            "data. The column layout may not match cells[0]=symbol, cells[7]=price, cells[10]=volume "
+            "anymore. Turn on debug mode and check the raw row HTML."
+        )
+
+    return data
 
 
 def _fetch_one_day(symbol: str, date_str: str):
@@ -143,9 +192,13 @@ def sync_history(symbols=None, days_back: int = 5):
 st.set_page_config(layout="centered")
 init_db()
 
+debug_mode = st.checkbox("Debug mode (show scrape diagnostics)", value=False)
+
 if st.button("🔄 Full Scan & Sync"):
     with st.spinner("Fetching Live Data..."):
-        live = get_live_data()
+        live = get_live_data(debug=debug_mode)
+        if debug_mode:
+            st.write(f"Live symbols returned: {len(live)}")
         today = datetime.now(PKT).strftime("%Y-%m-%d")
         now_iso = datetime.now(PKT).isoformat()
         with get_db() as conn:
@@ -160,12 +213,14 @@ if st.button("🔄 Full Scan & Sync"):
                     (today, sym, d["volume"]),
                 )
             conn.commit()
-    st.rerun()
+    if not debug_mode:
+        st.rerun()
 
 if st.button("⬇️ Sync Historical"):
     with st.spinner("Fetching historical data..."):
         sync_history()
-    st.rerun()
+    if not debug_mode:
+        st.rerun()
 
 # ── Display ────────────────────────────────────────────────────────────────
 with get_db() as conn:
