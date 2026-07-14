@@ -23,6 +23,24 @@ HISTORICAL_HEADERS = {
     "Referer": "https://dps.psx.com.pk/historical",
 }
 
+# Shared session with automatic retry/backoff — PSX (or its CDN) will drop
+# connections outright (RemoteDisconnected) if hit too fast/too often, so we
+# retry transient failures with increasing delay instead of giving up immediately.
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
+SESSION = requests.Session()
+_retry = Retry(
+    total=4,
+    connect=4,
+    read=4,
+    backoff_factor=2,  # 2s, 4s, 8s, 16s between retries
+    status_forcelist=[429, 500, 502, 503, 504],
+    allowed_methods=frozenset(["GET", "POST"]),
+)
+SESSION.mount("https://", HTTPAdapter(max_retries=_retry))
+SESSION.mount("http://", HTTPAdapter(max_retries=_retry))
+
 # KSE-100 constituent symbols tracked for historical sync
 WATCHLIST = [
     "ABL", "ABOT", "AGP", "AICL", "AIRLINK", "AKBL", "ATLH", "ATRL",
@@ -69,7 +87,7 @@ def get_live_data(debug: bool = False):
     """Scrapes live market-watch data from PSX (SYMBOL ... CURRENT ... VOLUME)."""
     url = "https://dps.psx.com.pk/market-watch"
     try:
-        resp = requests.get(url, headers=LIVE_HEADERS, timeout=15)
+        resp = SESSION.get(url, headers=LIVE_HEADERS, timeout=15)
     except requests.RequestException as e:
         st.error(f"Live Scrape Failed — request error: {e}")
         return {}
@@ -149,7 +167,7 @@ def _fetch_symbol_history(symbol: str):
     Returns a list of (date_str, volume) tuples.
     """
     url = "https://dps.psx.com.pk/historical"
-    resp = requests.post(url, data={"symbol": symbol}, headers=HISTORICAL_HEADERS, timeout=15)
+    resp = SESSION.post(url, data={"symbol": symbol}, headers=HISTORICAL_HEADERS, timeout=15)
     resp.raise_for_status()
 
     soup = BeautifulSoup(resp.text, "html.parser")
@@ -191,13 +209,13 @@ def _fetch_symbol_history(symbol: str):
     return out
 
 
-def sync_history(symbols=None):
+def sync_history(symbols=None, progress_cb=None):
     """Backfills daily_volume for the given symbols from their full history."""
     symbols = symbols or WATCHLIST
     results, errors = 0, []
 
     with get_db() as conn:
-        for sym in symbols:
+        for i, sym in enumerate(symbols):
             try:
                 rows = _fetch_symbol_history(sym)
                 for date_str, volume in rows:
@@ -207,10 +225,12 @@ def sync_history(symbols=None):
                         (date_str, sym, volume),
                     )
                     results += 1
-                time.sleep(0.3)  # be polite between symbols
             except requests.RequestException as e:
                 errors.append(f"{sym}: {e}")
-                continue
+            finally:
+                if progress_cb:
+                    progress_cb((i + 1) / len(symbols), sym)
+                time.sleep(1.5)  # slow and steady — PSX drops connections if hit too fast
         conn.commit()
 
     if errors:
@@ -256,8 +276,9 @@ if scan_clicked:
         st.rerun()
 
 if sync_clicked:
-    with st.spinner("Syncing history..."):
-        sync_history()
+    progress = st.progress(0.0, text="Starting…")
+    sync_history(progress_cb=lambda frac, sym: progress.progress(frac, text=f"Syncing {sym}…"))
+    progress.empty()
     if not debug_mode:
         st.rerun()
 
