@@ -33,7 +33,7 @@ import streamlit as st
 
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "volume_spikes.db")
 POLL_SECONDS = 15 * 60
-RVOL_SPIKE_THRESHOLD = 2.0
+RVOL_SPIKE_THRESHOLD = 1.8
 AVG_DAYS = 20
 TOP_N = 10
 PKT = ZoneInfo("Asia/Karachi")
