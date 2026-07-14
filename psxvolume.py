@@ -1,9 +1,13 @@
 """
 PSX Volume Spike Detector — single-file Streamlit app.
 
-Every time the page loads (or is refreshed), if 15+ minutes have passed
-since the last scan, it fetches live price/volume for the KSE-100 symbols
-below, updates the SQLite DB, and recomputes RVOL / spike status.
+Auto-scans live data every 15 min, but only while PSX is open: Mon-Fri,
+9:15 AM - 3:30 PM Pakistan time (Asia/Karachi). Two buttons let you force
+things manually:
+  - Scan  : fetch live price/volume right now and recompute spikes.
+  - Sync  : backfill ~25 trading days of real historical daily volume per
+            symbol (via Yahoo Finance) so the 20-day average is accurate
+            from day one, instead of slowly building up from live scans.
 
   - RVOL = today's volume / 20-day average daily volume. Candidate if >= 2x.
   - 15-min trend for candidates: Increasing/Decreasing vs that symbol's own
@@ -14,13 +18,14 @@ below, updates the SQLite DB, and recomputes RVOL / spike status.
     day starts.
 
 Run:
-    pip install streamlit requests pandas
+    pip install streamlit requests pandas yfinance
     streamlit run app.py
 """
 
 import os
 import sqlite3
-from datetime import datetime
+from datetime import datetime, time as dtime
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import requests
@@ -31,6 +36,9 @@ POLL_SECONDS = 15 * 60
 RVOL_SPIKE_THRESHOLD = 2.0
 AVG_DAYS = 20
 TOP_N = 10
+PKT = ZoneInfo("Asia/Karachi")
+MARKET_OPEN = dtime(9, 15)
+MARKET_CLOSE = dtime(15, 30)
 
 KSE100 = [
     "ABL", "ABOT", "AGP", "AHCL", "AICL", "AIRLINK", "AKBL", "APL", "ATLH", "ATRL",
@@ -79,6 +87,47 @@ def init_db():
     )
     conn.commit()
     conn.close()
+
+
+# ── Market hours ─────────────────────────────────────────────────────────────
+def is_market_open():
+    now = datetime.now(PKT)
+    if now.weekday() >= 5:  # Sat=5, Sun=6
+        return False
+    return MARKET_OPEN <= now.time() <= MARKET_CLOSE
+
+
+# ── Historical sync ──────────────────────────────────────────────────────────
+def sync_historical_data(days=30):
+    """Backfill daily_volume with real historical daily volume per symbol,
+    via Yahoo Finance (PSX tickers use the .KA suffix there). Returns
+    (num_symbols_synced, num_failed)."""
+    import yfinance as yf
+
+    conn = get_db()
+    ok, failed = 0, 0
+    for symbol in KSE100:
+        try:
+            hist = yf.Ticker(f"{symbol}.KA").history(period=f"{days}d")
+            if hist.empty:
+                failed += 1
+                continue
+            for idx, row in hist.iterrows():
+                date_str = idx.strftime("%Y-%m-%d")
+                vol = float(row["Volume"] or 0)
+                if vol <= 0:
+                    continue
+                conn.execute(
+                    "INSERT INTO daily_volume (date, symbol, volume) VALUES (?,?,?) "
+                    "ON CONFLICT(date, symbol) DO UPDATE SET volume=excluded.volume",
+                    (date_str, symbol, vol),
+                )
+            ok += 1
+        except Exception:
+            failed += 1
+    conn.commit()
+    conn.close()
+    return ok, failed
 
 
 # ── Data fetch ───────────────────────────────────────────────────────────────
@@ -222,13 +271,26 @@ init_db()
 
 if "last_scan" not in st.session_state:
     st.session_state.last_scan = 0
-if (datetime.now().timestamp() - st.session_state.last_scan) >= POLL_SECONDS:
+if is_market_open() and (datetime.now().timestamp() - st.session_state.last_scan) >= POLL_SECONDS:
     with st.spinner("Scanning..."):
         run_scan_cycle()
     st.session_state.last_scan = datetime.now().timestamp()
 
 st.title("📊 Volume Spikes")
-st.caption(f"KSE-100 · RVOL ≥ {RVOL_SPIKE_THRESHOLD}x · Top {TOP_N} by RVOL")
+st.caption(f"KSE-100 · RVOL ≥ {RVOL_SPIKE_THRESHOLD}x · Top {TOP_N} by RVOL · "
+           f"Market {'open' if is_market_open() else 'closed'} (9:15 AM–3:30 PM PKT)")
+
+col1, col2 = st.columns(2)
+if col1.button("🔍 Scan"):
+    with st.spinner("Scanning live market data..."):
+        run_scan_cycle()
+    st.session_state.last_scan = datetime.now().timestamp()
+    st.rerun()
+if col2.button("⬇️ Sync"):
+    with st.spinner("Downloading historical data..."):
+        ok, failed = sync_historical_data()
+    st.success(f"Synced {ok} symbols" + (f", {failed} failed" if failed else ""))
+    st.rerun()
 
 conn = get_db()
 today_rows = conn.execute(
