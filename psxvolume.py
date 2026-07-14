@@ -2,19 +2,26 @@ import streamlit as st
 import yfinance as yf
 import sqlite3
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, time as dtime
+from zoneinfo import ZoneInfo
 
 # ── Configuration ────────────────────────────────────────────────────────
 DB_NAME = "volume_scanner.db"
+TZ = ZoneInfo("Asia/Karachi")          # PSX timezone
+MARKET_OPEN = dtime(9, 15)
+MARKET_CLOSE = dtime(15, 30)
+RVOL_THRESHOLD = 1.5
+SNAPSHOT_INTERVAL_MIN = 15
+
 WATCHLIST = [
-    "ABL.KA", "ABOT.KA", "AGP.KA", "AICL.KA", "AIRLINK.KA", "AKBL.KA", "ATLH.KA", 
-    "ATRL.KA", "BAFL.KA", "BAHL.KA", "BOP.KA", "BPL.KA", "BWCL.KA", "CHCC.KA", 
-    "CNERGY.KA", "COLG.KA", "DGKC.KA", "EFERT.KA", "ENGRO.KA", "EPCL.KA", 
-    "FATIMA.KA", "FCCL.KA", "FFC.KA", "FFL.KA", "GHGL.KA", "GHNI.KA", "HALEON.KA", 
-    "HCAR.KA", "HINOON.KA", "HUBC.KA", "INDU.KA", "INIL.KA", "KAPCO.KA", "KEL.KA", 
-    "KOHC.KA", "KTML.KA", "LCI.KA", "LUCK.KA", "MARI.KA", "MCB.KA", "MEBL.KA", 
-    "NBP.KA", "OGDC.KA", "PAEL.KA", "PAKT.KA", "PIBTL.KA", "PIOC.KA", "PKGS.KA", 
-    "PPL.KA", "PRL.KA", "PSO.KA", "PTC.KA", "SAZEW.KA", "SEARL.KA", "SNGP.KA", 
+    "ABL.KA", "ABOT.KA", "AGP.KA", "AICL.KA", "AIRLINK.KA", "AKBL.KA", "ATLH.KA",
+    "ATRL.KA", "BAFL.KA", "BAHL.KA", "BOP.KA", "BPL.KA", "BWCL.KA", "CHCC.KA",
+    "CNERGY.KA", "COLG.KA", "DGKC.KA", "EFERT.KA", "ENGRO.KA", "EPCL.KA",
+    "FATIMA.KA", "FCCL.KA", "FFC.KA", "FFL.KA", "GHGL.KA", "GHNI.KA", "HALEON.KA",
+    "HCAR.KA", "HINOON.KA", "HUBC.KA", "INDU.KA", "INIL.KA", "KAPCO.KA", "KEL.KA",
+    "KOHC.KA", "KTML.KA", "LCI.KA", "LUCK.KA", "MARI.KA", "MCB.KA", "MEBL.KA",
+    "NBP.KA", "OGDC.KA", "PAEL.KA", "PAKT.KA", "PIBTL.KA", "PIOC.KA", "PKGS.KA",
+    "PPL.KA", "PRL.KA", "PSO.KA", "PTC.KA", "SAZEW.KA", "SEARL.KA", "SNGP.KA",
     "SYS.KA", "TGL.KA", "THALL.KA", "TPLP.KA", "TRG.KA", "UBL.KA", "WTL.KA"
 ]
 
@@ -22,97 +29,394 @@ WATCHLIST = [
 def init_db():
     with sqlite3.connect(DB_NAME) as conn:
         conn.execute("""
-            CREATE TABLE IF NOT EXISTS spikes (
-                date TEXT, 
-                symbol TEXT, 
-                rvol REAL, 
-                price_change REAL,
-                UNIQUE(date, symbol)
-            )
-        """)
-        # Dedicated table to lock down the true past 3 trading days
-        conn.execute("""
             CREATE TABLE IF NOT EXISTS trading_dates (
                 idx INTEGER PRIMARY KEY,
                 date TEXT UNIQUE
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS spikes (
+                date TEXT,
+                symbol TEXT,
+                rvol REAL,
+                price_change REAL,
+                volume_direction TEXT,
+                price_direction TEXT,
+                UNIQUE(date, symbol)
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS live_snapshots (
+                snap_time TEXT,
+                symbol TEXT,
+                cum_volume REAL,
+                price REAL,
+                rvol REAL,
+                price_change REAL,
+                volume_direction TEXT,
+                price_direction TEXT,
+                vol_chg_1h REAL,
+                vol_chg_2h REAL,
+                UNIQUE(snap_time, symbol)
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS meta (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            )
+        """)
+        conn.commit()
 
-def sync_data():
-    """Fetch historical data, calculate metrics, and save to SQLite."""
-    raw_data = yf.download(WATCHLIST, period="1mo", group_by='ticker', threads=True)
-    
-    # Extract actual calendar trading dates from the market data
+
+def get_meta(key):
+    with sqlite3.connect(DB_NAME) as conn:
+        row = conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+    return row[0] if row else None
+
+
+def set_meta(key, value):
+    with sqlite3.connect(DB_NAME) as conn:
+        conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (key, value))
+        conn.commit()
+
+
+# ── Helpers ──────────────────────────────────────────────────────────────
+def is_market_open(now):
+    return now.weekday() < 5 and MARKET_OPEN <= now.time() <= MARKET_CLOSE
+
+
+def direction_labels(change):
+    """Returns an up/down/flat label for a numeric change value."""
+    if change is None or pd.isna(change):
+        return "— N/A"
+    if change > 0:
+        return "▲ Up"
+    if change < 0:
+        return "▼ Down"
+    return "— Flat"
+
+
+def trading_fraction_elapsed(now):
+    """Fraction of today's trading session that has elapsed, used to annualize live volume."""
+    open_dt = datetime.combine(now.date(), MARKET_OPEN, tzinfo=TZ)
+    close_dt = datetime.combine(now.date(), MARKET_CLOSE, tzinfo=TZ)
+    if now <= open_dt:
+        return 0.02
+    if now >= close_dt:
+        return 1.0
+    total = (close_dt - open_dt).total_seconds()
+    elapsed = (now - open_dt).total_seconds()
+    return max(elapsed / total, 0.02)
+
+
+# ── Historical Sync (once a day) ────────────────────────────────────────
+def sync_historical_data():
+    """Fetch daily historical data, calculate RVOL/price-change/direction, save to SQLite."""
+    try:
+        raw_data = yf.download(WATCHLIST, period="2mo", group_by='ticker', threads=True, progress=False)
+    except Exception as e:
+        st.error(f"Failed to download historical data: {e}")
+        return False
+
     sample_ticker = WATCHLIST[0]
-    if sample_ticker in raw_data and not raw_data[sample_ticker].empty:
-        trading_days = raw_data[sample_ticker].index.strftime('%Y-%m-%d').tolist()
-        last_5_days = trading_days[-5:]
-        
-        with sqlite3.connect(DB_NAME) as conn:
-            # Store them sorted by recency (0 = Today, 1 = Yesterday, 2 = 2 Days ago)
-            for idx, d_str in enumerate(reversed(last_5_days)):
-                conn.execute("INSERT OR REPLACE INTO trading_dates (idx, date) VALUES (?, ?)", (idx, d_str))
-            conn.commit()
+    if sample_ticker not in raw_data or raw_data[sample_ticker].empty:
+        st.error("No historical data returned. Please try again later.")
+        return False
+
+    trading_days = raw_data[sample_ticker].index.strftime('%Y-%m-%d').tolist()
+    last_days = trading_days[-5:]
 
     with sqlite3.connect(DB_NAME) as conn:
+        # idx 0 = most recent closed trading day (Yesterday), idx 1 = day before that, etc.
+        for idx, d_str in enumerate(reversed(last_days)):
+            conn.execute("INSERT OR REPLACE INTO trading_dates (idx, date) VALUES (?, ?)", (idx, d_str))
+
         for symbol in WATCHLIST:
+            if symbol not in raw_data:
+                continue
             df = raw_data[symbol].copy()
-            if df.empty: continue
-            
-            # Calculations
+            if df.empty:
+                continue
+            df = df.dropna(subset=['Volume', 'Close'])
+            if df.empty:
+                continue
+
             sma_vol = df['Volume'].rolling(window=20).mean()
             rvol = df['Volume'] / sma_vol
             pct_change = df['Close'].pct_change() * 100
-            
+            vol_diff = df['Volume'].diff()
+
             clean_symbol = symbol.replace('.KA', '')
-            
-            # Look through all trailing 5 days to capture history completely
+
             for date, val in rvol.tail(5).items():
-                if val >= 1.5:
-                    conn.execute("""
-                        INSERT OR REPLACE INTO spikes (date, symbol, rvol, price_change)
-                        VALUES (?, ?, ?, ?)
-                    """, (date.strftime('%Y-%m-%d'), clean_symbol, round(val, 2), round(pct_change.loc[date], 2)))
+                if pd.isna(val) or val < RVOL_THRESHOLD:
+                    continue
+                pchg = pct_change.loc[date]
+                vdiff = vol_diff.loc[date]
+                pchg = None if pd.isna(pchg) else round(float(pchg), 2)
+                vol_dir = "▲ Rising" if (pd.notna(vdiff) and vdiff > 0) else "▼ Falling"
+                price_dir = direction_labels(pchg)
+
+                conn.execute("""
+                    INSERT OR REPLACE INTO spikes
+                    (date, symbol, rvol, price_change, volume_direction, price_direction)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                """, (date.strftime('%Y-%m-%d'), clean_symbol, round(float(val), 2), pchg, vol_dir, price_dir))
+
         conn.commit()
 
-# ── Dashboard UI ─────────────────────────────────────────────────────────
-st.set_page_config(layout="wide", page_title="Volume Spike History")
+    set_meta("last_sync_date", datetime.now(TZ).strftime('%Y-%m-%d'))
+    set_meta("last_sync_time", datetime.now(TZ).isoformat())
+    return True
+
+
+# ── Live Scan (every 15 min during market hours) ────────────────────────
+def get_reference_data():
+    """20-day average daily volume + last completed close, per symbol, from daily history."""
+    try:
+        hist = yf.download(WATCHLIST, period="2mo", group_by='ticker', threads=True, progress=False)
+    except Exception as e:
+        st.error(f"Failed to download reference data: {e}")
+        return {}, {}
+
+    today_str = datetime.now(TZ).strftime('%Y-%m-%d')
+    avg_vol, prev_close = {}, {}
+    for symbol in WATCHLIST:
+        if symbol not in hist:
+            continue
+        df = hist[symbol].dropna(subset=['Volume', 'Close'])
+        if df.empty:
+            continue
+        # Exclude an in-progress "today" row if present, so prev_close is truly the last close.
+        completed = df[df.index.strftime('%Y-%m-%d') < today_str]
+        base = completed if not completed.empty else df
+        avg_vol[symbol] = base['Volume'].tail(20).mean()
+        prev_close[symbol] = base['Close'].iloc[-1]
+    return avg_vol, prev_close
+
+
+def scan_live_data():
+    """Pull today's intraday bars (15m) and compute live RVOL / direction metrics."""
+    now = datetime.now(TZ)
+    avg_vol_map, prev_close_map = get_reference_data()
+    if not avg_vol_map:
+        return False
+
+    try:
+        intraday = yf.download(WATCHLIST, period="1d", interval="15m", group_by='ticker',
+                                threads=True, progress=False)
+    except Exception as e:
+        st.error(f"Failed to download live intraday data: {e}")
+        return False
+
+    sample_ticker = WATCHLIST[0]
+    if sample_ticker not in intraday or intraday[sample_ticker].empty:
+        st.warning("No intraday data available yet (market may be closed).")
+        return False
+
+    fraction = trading_fraction_elapsed(now)
+    snap_time = now.strftime('%Y-%m-%d %H:%M')
+
+    with sqlite3.connect(DB_NAME) as conn:
+        for symbol in WATCHLIST:
+            if symbol not in intraday:
+                continue
+            df = intraday[symbol].dropna(subset=['Volume', 'Close'])
+            if df.empty:
+                continue
+
+            clean_symbol = symbol.replace('.KA', '')
+            cum_volume = float(df['Volume'].sum())
+            last_price = float(df['Close'].iloc[-1])
+
+            avg_daily_vol = avg_vol_map.get(symbol)
+            prev_close = prev_close_map.get(symbol)
+            if not avg_daily_vol or avg_daily_vol == 0:
+                continue
+
+            rvol = cum_volume / (avg_daily_vol * fraction)
+            price_change = ((last_price - prev_close) / prev_close) * 100 if prev_close else None
+            price_change = round(price_change, 2) if price_change is not None else None
+
+            if len(df) >= 2:
+                volume_direction = "▲ Rising" if df['Volume'].iloc[-1] > df['Volume'].iloc[-2] else "▼ Falling"
+                price_direction = direction_labels(df['Close'].iloc[-1] - df['Close'].iloc[-2])
+            else:
+                volume_direction = "— N/A"
+                price_direction = "— N/A"
+
+            def pct_change_since(bars_back):
+                if len(df) > bars_back:
+                    past_cum = df['Volume'].iloc[:len(df) - bars_back].sum()
+                    if past_cum > 0:
+                        return round(((cum_volume - past_cum) / past_cum) * 100, 2)
+                return None
+
+            vol_chg_1h = pct_change_since(4)   # 4 x 15min = 1 hour
+            vol_chg_2h = pct_change_since(8)   # 8 x 15min = 2 hours
+
+            if rvol >= RVOL_THRESHOLD:
+                conn.execute("""
+                    INSERT OR REPLACE INTO live_snapshots
+                    (snap_time, symbol, cum_volume, price, rvol, price_change,
+                     volume_direction, price_direction, vol_chg_1h, vol_chg_2h)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (snap_time, clean_symbol, cum_volume, last_price, round(rvol, 2), price_change,
+                      volume_direction, price_direction, vol_chg_1h, vol_chg_2h))
+        conn.commit()
+
+    set_meta("last_scan_time", now.isoformat())
+    return True
+
+
+# ── Page Setup & Styling ─────────────────────────────────────────────────
+st.set_page_config(layout="wide", page_title="PSX Volume Spike Scanner")
 init_db()
 
-st.title("📈 Historical Volume Spike Dashboard (RVOL ≥ 1.5)")
+st.markdown("""
+<style>
+    .stApp { background-color: #fafaf7; }
+    h1, h2, h3 { font-family: Georgia, 'Times New Roman', serif; color: #1a1a1a; }
+    .report-header {
+        border-bottom: 2px solid #1a1a1a;
+        padding-bottom: 10px;
+        margin-bottom: 20px;
+    }
+    .section-card {
+        background-color: #ffffff;
+        border: 1px solid #d8d5cc;
+        border-radius: 4px;
+        padding: 16px 18px;
+        margin-bottom: 10px;
+    }
+    .status-line {
+        font-family: Georgia, 'Times New Roman', serif;
+        font-size: 0.85rem;
+        color: #555;
+    }
+    div[data-testid="stDataFrame"] { font-family: Georgia, 'Times New Roman', serif; }
+</style>
+""", unsafe_allow_html=True)
 
-if st.button("🔄 Sync Historical Data"):
+now = datetime.now(TZ)
+market_open = is_market_open(now)
+
+st.markdown('<div class="report-header">', unsafe_allow_html=True)
+st.title("📈 PSX Volume Spike Report")
+st.caption(f"Relative Volume threshold ≥ {RVOL_THRESHOLD}  ·  Karachi time: {now.strftime('%Y-%m-%d %H:%M:%S')}  ·  "
+           f"Market is {'🟢 OPEN' if market_open else '🔴 CLOSED'} (session 9:15–15:30)")
+st.markdown('</div>', unsafe_allow_html=True)
+
+# Auto-refresh the page every 15 minutes while the market is open, so the live
+# section keeps itself current without the user needing to click anything.
+if market_open:
+    st.markdown(f'<meta http-equiv="refresh" content="{SNAPSHOT_INTERVAL_MIN * 60}">', unsafe_allow_html=True)
+
+# ── Buttons ──────────────────────────────────────────────────────────────
+col_a, col_b, col_c = st.columns([1, 1, 3])
+with col_a:
+    scan_clicked = st.button("📡 Scan Live Data", use_container_width=True)
+with col_b:
+    sync_clicked = st.button("🔄 Sync Historical Data", use_container_width=True)
+
+if scan_clicked:
+    with st.spinner("Scanning live market data..."):
+        if scan_live_data():
+            st.success("Live scan complete.")
+            st.rerun()
+
+if sync_clicked:
+    last_sync_date = get_meta("last_sync_date")
+    today_str = now.strftime('%Y-%m-%d')
+    if last_sync_date == today_str:
+        st.info("Historical data was already synced today. Re-syncing anyway.")
     with st.spinner("Processing historical data..."):
-        sync_data()
-        st.success("Historical data synced successfully!")
-        st.rerun()
+        if sync_historical_data():
+            st.success("Historical data synced successfully!")
+            st.rerun()
 
-# ── Query & Display ──────────────────────────────────────────────────────
+# Auto-scan once every 15 minutes during market hours, without requiring a click.
+if market_open and not scan_clicked:
+    last_scan_str = get_meta("last_scan_time")
+    should_scan = True
+    if last_scan_str:
+        try:
+            last_scan = datetime.fromisoformat(last_scan_str)
+            if (now - last_scan).total_seconds() < SNAPSHOT_INTERVAL_MIN * 60:
+                should_scan = False
+        except ValueError:
+            pass
+    if should_scan:
+        with st.spinner("Auto-scanning live market data (15-min cycle)..."):
+            scan_live_data()
+
+last_scan_time = get_meta("last_scan_time")
+last_sync_time = get_meta("last_sync_date")
+st.markdown(
+    f'<p class="status-line">Last live scan: {last_scan_time or "never"} &nbsp;·&nbsp; '
+    f'Last historical sync: {last_sync_time or "never"}</p>',
+    unsafe_allow_html=True
+)
+
+st.divider()
+
+# ── Section 1: Today (Live) ──────────────────────────────────────────────
+st.subheader("Today — Live")
+today_str = now.strftime('%Y-%m-%d')
 with sqlite3.connect(DB_NAME) as conn:
-    # Always pull the explicit historical calendar sequence
-    dates = [row[0] for row in conn.execute("SELECT date FROM trading_dates ORDER BY idx ASC LIMIT 3").fetchall()]
+    live_df = pd.read_sql("""
+        SELECT snap_time, symbol, rvol, price_change, volume_direction, price_direction,
+               vol_chg_1h, vol_chg_2h
+        FROM live_snapshots
+        WHERE snap_time LIKE ?
+        ORDER BY snap_time DESC
+    """, conn, params=(f"{today_str}%",))
 
-cols = st.columns(3)
-titles = ["Today (Latest)", "Yesterday", "Two Days Ago"]
+st.markdown('<div class="section-card">', unsafe_allow_html=True)
+if not live_df.empty:
+    latest_time = live_df['snap_time'].max()
+    st.caption(f"As of {latest_time} (PKT) · refreshes every {SNAPSHOT_INTERVAL_MIN} min while market is open")
+    live_df = live_df[live_df['snap_time'] == latest_time].drop(columns=['snap_time'])
+    live_df = live_df.sort_values('rvol', ascending=False)
+    live_df.columns = ["Symbol", "Relative Volume", "Price Change %", "Volume Direction",
+                        "Price Direction", "Vol Δ vs 1H Ago %", "Vol Δ vs 2H Ago %"]
+    st.dataframe(live_df, use_container_width=True, hide_index=True)
+else:
+    st.info("No live spikes yet today. Click 'Scan Live Data' during market hours (9:15–15:30 PKT).")
+st.markdown('</div>', unsafe_allow_html=True)
 
-for i, col in enumerate(cols):
+st.divider()
+
+# ── Sections 2 & 3: Yesterday / Two Days Ago (Historical) ───────────────
+with sqlite3.connect(DB_NAME) as conn:
+    hist_dates = [row[0] for row in
+                  conn.execute("SELECT date FROM trading_dates ORDER BY idx ASC LIMIT 2").fetchall()]
+
+hist_cols = st.columns(2)
+hist_titles = ["Yesterday", "Two Days Ago"]
+
+for i, col in enumerate(hist_cols):
     with col:
-        st.subheader(titles[i])
-        if i < len(dates):
-            target_date = dates[i]
+        st.subheader(hist_titles[i])
+        st.markdown('<div class="section-card">', unsafe_allow_html=True)
+        if i < len(hist_dates):
+            target_date = hist_dates[i]
             st.caption(f"Date: {target_date}")
-            
+
             with sqlite3.connect(DB_NAME) as conn:
-                df = pd.read_sql(
-                    "SELECT symbol, rvol, price_change FROM spikes WHERE date = ? ORDER BY rvol DESC",
-                    conn, params=(target_date,)
-                )
-            
+                df = pd.read_sql("""
+                    SELECT symbol, rvol, price_change, volume_direction, price_direction
+                    FROM spikes WHERE date = ? ORDER BY rvol DESC
+                """, conn, params=(target_date,))
+
             if not df.empty:
-                df.columns = ["Symbol", "Relative Volume", "Price Change %"]
+                df.columns = ["Symbol", "Relative Volume", "Price Change %",
+                              "Volume Direction", "Price Direction"]
                 st.dataframe(df, use_container_width=True, hide_index=True)
             else:
-                st.info("No spikes crossed RVOL ≥ 1.5 on this day.")
+                st.info(f"No spikes crossed RVOL ≥ {RVOL_THRESHOLD} on this day.")
         else:
             st.caption("Date: Unknown")
-            st.info("Click 'Sync Historical Data' above to initialize tables.")
+            st.info("Click 'Sync Historical Data' above to initialize this table.")
+        st.markdown('</div>', unsafe_allow_html=True)
