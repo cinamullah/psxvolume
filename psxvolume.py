@@ -23,9 +23,20 @@ HISTORICAL_HEADERS = {
     "Referer": "https://dps.psx.com.pk/historical",
 }
 
-# Symbols to track for historical sync. Replace with your full watchlist
-# (e.g. load from a CSV / the KSE-100 constituent list) instead of hardcoding.
-WATCHLIST = ["KSE100", "LUCK", "ENGRO"]
+# KSE-100 constituent symbols tracked for historical sync
+WATCHLIST = [
+    "ABL", "ABOT", "AGP", "AICL", "AIRLINK", "AKBL", "ATLH", "ATRL",
+    "BAFL", "BAHL", "BOP", "BPL", "BWCL", "CHCC", "CNERGY", "COLG",
+    "CPHL", "DCR", "DGKC", "EFERT", "ENGRO", "EPCL", "FATIMA", "FCCL",
+    "FFC", "FFL", "FHAM", "GADT", "GAL", "GHGL", "GHNI", "HALEON",
+    "HCAR", "HGFA", "HINOON", "HUBC", "HUMNL", "IBFL", "INDU", "INIL",
+    "JDWS", "KAPCO", "KEL", "KOHC", "KTML", "LCI", "LUCK", "MARI",
+    "MCB", "MEBL", "MEHT", "MUREB", "NBP", "NESTLE", "NPL", "OGDC",
+    "PABC", "PAEL", "PAKT", "PGLC", "PIBTL", "PIOC", "PKGS", "PPL",
+    "PRL", "PSEL", "PSO", "PSX", "PTC", "RMPL", "SAZEW", "SCBPL",
+    "SEARL", "SHFA", "SNGP", "SPWL", "SSGC", "SSOM", "SYS", "TGL",
+    "THALL", "TPLP", "TRG", "UBL", "UPFL", "WTL", "YOUW",
+]
 
 
 @contextmanager
@@ -209,16 +220,24 @@ def sync_history(symbols=None):
 
 
 # ── App Logic ──────────────────────────────────────────────────────────────
-st.set_page_config(layout="centered")
+st.set_page_config(layout="centered", page_title="PSX Volume Scanner")
 init_db()
 
-debug_mode = st.checkbox("Debug mode (show scrape diagnostics)", value=False)
+st.markdown(
+    "<h4 style='margin-bottom:0.2rem'>📈 PSX Volume Scanner</h4>",
+    unsafe_allow_html=True,
+)
 
-if st.button("🔄 Full Scan & Sync"):
-    with st.spinner("Fetching Live Data..."):
+col1, col2, col3 = st.columns([1, 1, 1])
+scan_clicked = col1.button("🔄 Scan", use_container_width=True)
+sync_clicked = col2.button("⬇️ History", use_container_width=True)
+debug_mode = col3.checkbox("Debug", value=False)
+
+if scan_clicked:
+    with st.spinner("Fetching..."):
         live = get_live_data(debug=debug_mode)
         if debug_mode:
-            st.write(f"Live symbols returned: {len(live)}")
+            st.caption(f"{len(live)} symbols parsed")
         today = datetime.now(PKT).strftime("%Y-%m-%d")
         now_iso = datetime.now(PKT).isoformat()
         with get_db() as conn:
@@ -236,8 +255,8 @@ if st.button("🔄 Full Scan & Sync"):
     if not debug_mode:
         st.rerun()
 
-if st.button("⬇️ Sync Historical"):
-    with st.spinner("Fetching historical data..."):
+if sync_clicked:
+    with st.spinner("Syncing history..."):
         sync_history()
     if not debug_mode:
         st.rerun()
@@ -250,9 +269,14 @@ with get_db() as conn:
             "SELECT DISTINCT date FROM daily_volume ORDER BY date DESC LIMIT 3"
         ).fetchall()
     ]
-    for d in dates:
-        st.subheader(f"Date: {d}")
-        df = pd.read_sql(
-            "SELECT * FROM daily_volume WHERE date = ?", conn, params=(d,)
-        )
-        st.dataframe(df)
+    if dates:
+        tabs = st.tabs(dates)
+        for tab, d in zip(tabs, dates):
+            with tab:
+                df = pd.read_sql(
+                    "SELECT symbol, volume FROM daily_volume WHERE date = ? ORDER BY volume DESC",
+                    conn, params=(d,),
+                )
+                st.dataframe(df, use_container_width=True, hide_index=True, height=320)
+    else:
+        st.caption("No data yet — click Scan or History to populate.")
