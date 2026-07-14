@@ -23,7 +23,8 @@ DB_NAME = "volume_scanner.db"
 TZ = ZoneInfo("Asia/Karachi")          # PSX timezone
 MARKET_OPEN = dtime(9, 15)
 MARKET_CLOSE = dtime(15, 30)
-RVOL_THRESHOLD = 1.0
+RVOL_THRESHOLD = 1.5
+TOP_N_LIVE = 15
 SNAPSHOT_INTERVAL_MIN = 15
 
 WATCHLIST = [
@@ -269,14 +270,13 @@ def scan_live_data():
             vol_chg_1h = pct_change_since(4)   # 4 x 15min = 1 hour
             vol_chg_2h = pct_change_since(8)   # 8 x 15min = 2 hours
 
-            if rvol >= RVOL_THRESHOLD:
-                conn.execute("""
-                    INSERT OR REPLACE INTO live_snapshots
-                    (snap_time, symbol, cum_volume, price, rvol, price_change,
-                     volume_direction, price_direction, vol_chg_1h, vol_chg_2h)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, (snap_time, clean_symbol, cum_volume, last_price, round(rvol, 2), price_change,
-                      volume_direction, price_direction, vol_chg_1h, vol_chg_2h))
+            conn.execute("""
+                INSERT OR REPLACE INTO live_snapshots
+                (snap_time, symbol, cum_volume, price, rvol, price_change,
+                 volume_direction, price_direction, vol_chg_1h, vol_chg_2h)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (snap_time, clean_symbol, cum_volume, last_price, round(rvol, 2), price_change,
+                  volume_direction, price_direction, vol_chg_1h, vol_chg_2h))
         conn.commit()
 
     set_meta("last_scan_time", now.isoformat())
@@ -367,7 +367,7 @@ market_open = is_market_open(now)
 st.markdown(f"""
 <div class="report-header">
     <h1>PSX Volume Spike Report</h1>
-    <p class="caption-line">RVOL threshold ≥ {RVOL_THRESHOLD} &nbsp;·&nbsp; Karachi time: {now.strftime('%Y-%m-%d %H:%M:%S')} &nbsp;·&nbsp; 
+    <p class="caption-line">Live: Top {TOP_N_LIVE} by Relative Volume &nbsp;·&nbsp; Historical: RVOL ≥ {RVOL_THRESHOLD} &nbsp;·&nbsp; Karachi time: {now.strftime('%Y-%m-%d %H:%M:%S')} &nbsp;·&nbsp; 
     Market {'🟢 OPEN' if market_open else '🔴 CLOSED'} (session 9:15–15:30)</p>
 </div>
 """, unsafe_allow_html=True)
@@ -438,14 +438,15 @@ with sqlite3.connect(DB_NAME) as conn:
 st.markdown('<div class="section-card">', unsafe_allow_html=True)
 if not live_df.empty:
     latest_time = live_df['snap_time'].max()
-    st.caption(f"As of {latest_time} (PKT) · refreshes every {SNAPSHOT_INTERVAL_MIN} min while market is open")
     live_df = live_df[live_df['snap_time'] == latest_time].drop(columns=['snap_time'])
-    live_df = live_df.sort_values('rvol', ascending=False)
+    live_df = live_df.sort_values('rvol', ascending=False).head(TOP_N_LIVE)
+    st.caption(f"Top {len(live_df)} by Relative Volume · as of {latest_time} (PKT) · "
+               f"refreshes every {SNAPSHOT_INTERVAL_MIN} min while market is open")
     live_df.columns = ["Symbol", "Relative Volume", "Price Change %", "Volume Direction",
                         "Price Direction", "Vol Δ vs 1H Ago %", "Vol Δ vs 2H Ago %"]
     st.dataframe(live_df, use_container_width=True, hide_index=True)
 else:
-    st.info("No live spikes yet today. Click 'Scan Live Data' during market hours (9:15–15:30 PKT).")
+    st.info("No live data yet today. Click 'Scan Live Data' during market hours (9:15–15:30 PKT).")
 st.markdown('</div>', unsafe_allow_html=True)
 
 # ── Sections 2 & 3: Yesterday / Two Days Ago (Historical, stacked) ──────
