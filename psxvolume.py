@@ -3,7 +3,7 @@ import sqlite3
 import requests
 import pandas as pd
 import streamlit as st
-from datetime import datetime, timedelta
+from datetime import datetime
 from bs4 import BeautifulSoup
 from zoneinfo import ZoneInfo
 from contextlib import contextmanager
@@ -11,7 +11,17 @@ from contextlib import contextmanager
 # ── Setup ──────────────────────────────────────────────────────────────────
 DB_PATH = "volume_spikes.db"
 PKT = ZoneInfo("Asia/Karachi")
-HEADERS = {"User-Agent": "Mozilla/5.0"}
+LIVE_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+    "X-Requested-With": "XMLHttpRequest",
+    "Referer": "https://dps.psx.com.pk/",
+}
+HISTORICAL_HEADERS = {
+    "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+    "X-Requested-With": "XMLHttpRequest",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Referer": "https://dps.psx.com.pk/historical",
+}
 
 # Symbols to track for historical sync. Replace with your full watchlist
 # (e.g. load from a CSV / the KSE-100 constituent list) instead of hardcoding.
@@ -48,7 +58,7 @@ def get_live_data(debug: bool = False):
     """Scrapes live market-watch data from PSX (SYMBOL ... CURRENT ... VOLUME)."""
     url = "https://dps.psx.com.pk/market-watch"
     try:
-        resp = requests.get(url, headers=HEADERS, timeout=15)
+        resp = requests.get(url, headers=LIVE_HEADERS, timeout=15)
     except requests.RequestException as e:
         st.error(f"Live Scrape Failed — request error: {e}")
         return {}
@@ -121,71 +131,81 @@ def get_live_data(debug: bool = False):
     return data
 
 
-def _fetch_one_day(symbol: str, date_str: str):
+def _fetch_symbol_history(symbol: str):
     """
-    PSX's /historical endpoint returns data for ONE symbol on ONE date per
-    request (POST {symbol, date}) — it does NOT return a date-range table
-    for just a symbol. This fetches a single day's row for a single symbol.
-    Returns None if there's no trading data for that date (e.g. holiday/weekend).
+    Single POST with just {'symbol': symbol} returns the FULL historical
+    table for that symbol (id='historicalTable'). No date parameter needed.
+    Returns a list of (date_str, volume) tuples.
     """
     url = "https://dps.psx.com.pk/historical"
-    resp = requests.post(
-        url, data={"symbol": symbol, "date": date_str}, headers=HEADERS, timeout=15
-    )
+    resp = requests.post(url, data={"symbol": symbol}, headers=HISTORICAL_HEADERS, timeout=15)
     resp.raise_for_status()
+
     soup = BeautifulSoup(resp.text, "html.parser")
-    table = soup.find("table")
+    table = soup.find("table", id="historicalTable")
     if not table or not table.find("tbody"):
-        return None
-    row = table.find("tbody").find("tr")
-    if not row:
-        return None
-    cols = [c.text.strip() for c in row.find_all("td")]
-    if len(cols) < 6:
-        return None
-    try:
-        # Typical column order: DATE, OPEN, HIGH, LOW, CLOSE, VOLUME
-        volume = float(cols[5].replace(",", ""))
-        return volume
-    except (ValueError, IndexError):
+        return []
+
+    # Map header labels to column indices instead of hardcoding positions,
+    # so this survives PSX reordering columns.
+    thead = table.find("thead")
+    headers_row = [th.text.strip().upper() for th in thead.find_all("th")] if thead else []
+
+    def find_col(*keywords):
+        for i, h in enumerate(headers_row):
+            if any(k in h for k in keywords):
+                return i
         return None
 
+    date_idx = find_col("DATE", "TIME")
+    vol_idx = find_col("VOLUME")
 
-def sync_history(symbols=None, days_back: int = 5):
-    """
-    Backfills daily_volume for the given symbols over the last `days_back`
-    calendar days. One symbol/day failing does not abort the whole sync.
-    """
+    out = []
+    for row in table.find("tbody").find_all("tr"):
+        cols = row.find_all("td")
+        if not cols:
+            continue
+        # Prefer data-value attribute (raw, unformatted) over display text
+        values = [c.get("data-value", c.text.strip()) for c in cols]
+
+        try:
+            raw_date = values[date_idx] if date_idx is not None else values[0]
+            raw_vol = values[vol_idx] if vol_idx is not None else values[-1]
+            date_str = pd.to_datetime(raw_date).strftime("%Y-%m-%d")
+            volume = float(str(raw_vol).replace(",", ""))
+            out.append((date_str, volume))
+        except (ValueError, IndexError, TypeError):
+            continue
+
+    return out
+
+
+def sync_history(symbols=None):
+    """Backfills daily_volume for the given symbols from their full history."""
     symbols = symbols or WATCHLIST
-    today = datetime.now(PKT).date()
     results, errors = 0, []
 
     with get_db() as conn:
         for sym in symbols:
-            for i in range(days_back):
-                day = today - timedelta(days=i)
-                if day.weekday() >= 5:  # skip Sat/Sun — PSX doesn't trade
-                    continue
-                date_str = day.strftime("%Y-%m-%d")
-                try:
-                    volume = _fetch_one_day(sym, date_str)
-                    if volume is not None:
-                        conn.execute(
-                            "INSERT OR REPLACE INTO daily_volume (date, symbol, volume) "
-                            "VALUES (?, ?, ?)",
-                            (date_str, sym, volume),
-                        )
-                        results += 1
-                    time.sleep(0.3)  # be polite to the endpoint
-                except requests.RequestException as e:
-                    errors.append(f"{sym} {date_str}: {e}")
-                    continue
+            try:
+                rows = _fetch_symbol_history(sym)
+                for date_str, volume in rows:
+                    conn.execute(
+                        "INSERT OR REPLACE INTO daily_volume (date, symbol, volume) "
+                        "VALUES (?, ?, ?)",
+                        (date_str, sym, volume),
+                    )
+                    results += 1
+                time.sleep(0.3)  # be polite between symbols
+            except requests.RequestException as e:
+                errors.append(f"{sym}: {e}")
+                continue
         conn.commit()
 
     if errors:
-        st.warning(f"Synced {results} rows, {len(errors)} requests failed.")
+        st.warning(f"Synced {results} rows, {len(errors)} symbols failed: {'; '.join(errors)}")
     else:
-        st.success(f"Synced {results} rows.")
+        st.success(f"Synced {results} rows across {len(symbols)} symbols.")
 
 
 # ── App Logic ──────────────────────────────────────────────────────────────
