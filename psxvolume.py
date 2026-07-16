@@ -25,17 +25,32 @@ RVOL_THRESHOLD = 1.0
 SNAPSHOT_INTERVAL_MIN = 15
 TV_URL = "https://scanner.tradingview.com/pakistan/scan"
 
-WATCHLIST = [
-    "ABL.KA", "ABOT.KA", "AGP.KA", "AICL.KA", "AIRLINK.KA", "AKBL.KA", "ATLH.KA",
-    "ATRL.KA", "BAFL.KA", "BAHL.KA", "BOP.KA", "BPL.KA", "BWCL.KA", "CHCC.KA",
-    "CNERGY.KA", "COLG.KA", "DGKC.KA", "EFERT.KA", "ENGRO.KA", "EPCL.KA",
-    "FATIMA.KA", "FCCL.KA", "FFC.KA", "FFL.KA", "GHGL.KA", "GHNI.KA", "HALEON.KA",
-    "HCAR.KA", "HINOON.KA", "HUBC.KA", "INDU.KA", "INIL.KA", "KAPCO.KA", "KEL.KA",
-    "KOHC.KA", "KTML.KA", "LCI.KA", "LUCK.KA", "MARI.KA", "MCB.KA", "MEBL.KA",
-    "NBP.KA", "OGDC.KA", "PAEL.KA", "PAKT.KA", "PIBTL.KA", "PIOC.KA", "PKGS.KA",
-    "PPL.KA", "PRL.KA", "PSO.KA", "PTC.KA", "SAZEW.KA", "SEARL.KA", "SNGP.KA",
-    "SYS.KA", "TGL.KA", "THALL.KA", "TPLP.KA", "TRG.KA", "UBL.KA", "WTL.KA"
+# Full KSE-100 constituents plus additional symbols previously tracked.
+# Symbols that fail data fetch are gracefully skipped by sync/scan functions.
+_KSE100 = [
+    "ABL", "ABOT", "ACPL", "AGHA", "AGL", "AHL", "AIRLINK", "AKBL", "ALNRS",
+    "APL", "ASTL", "ATLH", "ATRL", "AVN", "BAFL", "BAHL", "BATA", "BOP",
+    "BWCL", "BYCO", "CEPB", "CHCC", "CLOV", "CNERGY", "COLG", "CPHL", "CPSL",
+    "CSIL", "DCR", "DGKC", "DOL", "EFERT", "ELCR", "ENGRO", "EPCL", "EXIDE",
+    "FABL", "FATIMA", "FCCL", "FFC", "FLYNG", "GADT", "GAL", "GATM", "GLAXO",
+    "GLOW", "GTECH", "HABSM", "HALEON", "HASCOL", "HBL", "HCAR", "HMB",
+    "HUBC", "HUMNL", "IBFL", "ICL", "ILP", "INDU", "ISL", "JDMT", "JLICL",
+    "JSBL", "JSCL", "KAPCO", "KEL", "KOSM", "KTML", "LCI", "LOTCHEM", "LUCK",
+    "MARI", "MCB", "MCR", "MEBL", "MLCF", "MTL", "MUGHAL", "NAGC", "NATF",
+    "NBP", "NCPL", "NESTLE", "NETSOL", "NML", "NOPK", "NPL", "NRL", "OBOY",
+    "OGDC", "OILC", "OLPL", "PACRA", "PAEL", "PAKT", "PCAL", "PIOC", "PIBTL",
+    "PKGS", "POL", "POWER", "PPL", "PRL", "PSEL", "PSO", "PTC", "RMPL",
+    "RUPL", "SACGH", "SANSM", "SAZEW", "SCBPL", "SEARL", "SHEL", "SILK",
+    "SINDM", "SNGP", "SNLPL", "SPWL", "SRVI", "SSGC", "STJT", "STPL", "SURC",
+    "SUTM", "SYS", "TGL", "TELE", "THALL", "TOMCL", "TPLP", "TRG", "TREET",
+    "TRIPF", "TRSM", "UBL", "UDPL", "UNITY", "UPFL", "WTL", "YOUSP", "YOUW",
+    "ZIL", "ZHZBANK",
 ]
+# Extra symbols tracked previously that are not KSE-100 constituents.
+_EXTRA = ["AGP", "AICL", "BPL", "FFL", "GHGL", "GHNI", "HINOON", "INIL", "KOHC"]
+
+WATCHLIST = sorted(set(_KSE100 + _EXTRA), key=lambda s: s)
+WATCHLIST = [s + ".KA" for s in WATCHLIST]
 
 # ── Database Setup ───────────────────────────────────────────────────────
 def init_db():
