@@ -24,6 +24,10 @@ MARKET_CLOSE = dtime(15, 30)
 RVOL_THRESHOLD = 1.0
 SNAPSHOT_INTERVAL_MIN = 15
 TV_URL = "https://scanner.tradingview.com/pakistan/scan"
+# Historical RVOL baseline: use the mean volume over the entire 2-month
+# lookback window (not a short rolling SMA) so spikes are measured against
+# the full period's average activity.
+RVOL_BASELINE = "2mo"
 
 # Full KSE-100 constituents plus additional symbols previously tracked.
 # Symbols that fail data fetch are gracefully skipped by sync/scan functions.
@@ -131,8 +135,9 @@ def sync_historical_data():
             if df.empty:
                 continue
 
-            sma_vol = df['Volume'].rolling(window=20).mean()
-            rvol = df['Volume'] / sma_vol
+            # Baseline = mean volume across the whole 2-month period.
+            baseline_vol = df['Volume'].mean()
+            rvol = df['Volume'] / baseline_vol if baseline_vol else df['Volume'] * 0
             pct_change = df['Close'].pct_change() * 100
             vol_diff = df['Volume'].diff()
             clean_symbol = symbol.replace('.KA', '')
@@ -555,7 +560,7 @@ st.markdown(f"""
     Generated {now.strftime("%Y-%m-%d %H:%M:%S")} PKT
     &middot; Source: TradingView Scanner API, Yahoo Finance
     &middot; Watchlist: {len(WATCHLIST)} symbols<br>
-    Spikes are identified when Relative Volume (based on 10-day average from TV or 20-day SMA from Yahoo)
+    Spikes are identified when Relative Volume (based on 10-day average from TV or the full 2-month mean from Yahoo)
     meets or exceeds {RVOL_THRESHOLD}x. Quantitative screening tool only &mdash; not investment advice.
 </div>
 """, unsafe_allow_html=True)
